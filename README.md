@@ -1,6 +1,6 @@
 # Mods Updater
 
-Una aplicación para gestionar y actualizar mods de Minecraft desde Modrinth.
+Una aplicación para gestionar y actualizar mods de Minecraft. Este programa NO CREA NUEVOS DIRECTORIOS DEL JUEGO SINO CARPETAS DE MODS DE CADA VERSIÓN.
 
 ## Características
 
@@ -25,7 +25,6 @@ Una aplicación para gestionar y actualizar mods de Minecraft desde Modrinth.
 2. Clonar el repositorio:
    ```powershell
    git clone https://github.com/TU_USUARIO/mods-updater.git
-   cd mods-updater
    ```
 
 3. Compilar y ejecutar:

@@ -46,4 +46,8 @@ Una aplicación para gestionar y actualizar mods de Minecraft desde Modrinth.
 - Apache License, Version 2.0
 - MIT license
 
+<<<<<<< HEAD
 at your option.
+=======
+at your option.
+>>>>>>> 39e7b46f5d3d1b03c00365275a638b4212558cd6

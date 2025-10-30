@@ -23,12 +23,12 @@ Una aplicación para gestionar y actualizar mods de Minecraft. Este programa NO 
    ```
 
 2. Clonar el repositorio:
-   ```powershell
+   ```cmd
    git clone https://github.com/TU_USUARIO/mods-updater.git
    ```
 
 3. Compilar y ejecutar:
-   ```powershell
+   ```cmd
    cargo run
    ```
 

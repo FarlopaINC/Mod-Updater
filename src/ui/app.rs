@@ -5,6 +5,7 @@ use indexmap::IndexMap;
 use std::ops::{Deref, DerefMut};
 use crossbeam_channel::{unbounded, Sender, Receiver};
 use crate::download::{spawn_workers, DownloadJob, DownloadEvent};
+use crate::path_vars::PATHS;
 
 #[derive(Debug, Clone)]
 pub enum ModStatus {
@@ -47,7 +48,7 @@ pub struct ModUpdaterApp {
 
 impl ModUpdaterApp {
     pub fn new(mods: IndexMap<String, ModInfo>) -> Self {
-        let mc_versions = get_minecraft_versions(r"C:\Users\Mario\AppData\Roaming\.minecraft\versions\version_manifest_v2.json");
+        let mc_versions = get_minecraft_versions(PATHS.versions_folder.join("version_manifest_V2.json"));
         let selected_mc_version = mc_versions.get(0).cloned().unwrap_or_else(|| "1.20.2".to_string());
         let ui_mods: IndexMap<String, UiModInfo> = mods.into_iter().map(|(k, v)| (k, UiModInfo::from(v))).collect();
 

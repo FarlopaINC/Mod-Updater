@@ -4,9 +4,9 @@ mod ui;
 mod download;
 use crate::ui::app::ModUpdaterApp;
 use crate::manage_mods::{read_mods_in_folder, save_cache, load_cache};
+use crate::path_vars::PATHS;
 
 fn main() {
-    // Ruta de la carpeta de mods
     let mods_folder = r"C:\Users\Mario\AppData\Roaming\.minecraft\mods";
     // Leemos los mods detectados en carpeta
     let mut detected = read_mods_in_folder(mods_folder);

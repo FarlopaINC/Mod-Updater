@@ -92,7 +92,7 @@ fn cache_path() -> Option<std::path::PathBuf> {
         dir.push("modrinth_cache.json");
         return Some(dir);
     }
-    None
+    return None;
 }
 
 pub fn load_cache() -> IndexMap<String, ModInfo> {
@@ -105,7 +105,7 @@ pub fn load_cache() -> IndexMap<String, ModInfo> {
             }
         }
     }
-    IndexMap::new()
+    return IndexMap::new();
 }
 
 pub fn save_cache(map: &IndexMap<String, ModInfo>) {

@@ -13,16 +13,16 @@ pub struct Paths {
     pub base_game_folder: PathBuf,
     pub mods_folder: PathBuf,
     pub versions_folder: PathBuf,
-    pub cache_file: PathBuf,
+    pub modpacks_folder: PathBuf,
 }
 
 impl Paths {
-    pub fn new(base_game_folder: PathBuf) -> Self {
+    pub fn new(base_game_path: PathBuf) -> Self {
         Self {
-            mods_folder: base_game_folder.join("mods"),
-            versions_folder: base_game_folder.join("versions"),
-            modpacks_folder: base_game_folder.join("modpacks"),
-            base_game_folder,
+            mods_folder: base_game_path.join("mods"),
+            versions_folder: base_game_path.join("versions"),
+            modpacks_folder: base_game_path.join("modpacks"),
+            base_game_folder: base_game_path,
         }
     }
 }

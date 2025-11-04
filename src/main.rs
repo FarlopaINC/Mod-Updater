@@ -2,14 +2,14 @@ mod manage_mods;
 mod utils;
 mod ui;
 mod download;
+mod paths_vars;
 use crate::ui::app::ModUpdaterApp;
 use crate::manage_mods::{read_mods_in_folder, save_cache, load_cache};
-use crate::path_vars::PATHS;
+use crate::paths_vars::PATHS;
 
 fn main() {
-    let mods_folder = r"C:\Users\Mario\AppData\Roaming\.minecraft\mods";
     // Leemos los mods detectados en carpeta
-    let mut detected = read_mods_in_folder(mods_folder);
+    let mut detected = read_mods_in_folder(&PATHS.mods_folder.to_string_lossy().to_string());
 
     // Cargamos cache y fusionamos confirmed_project_id si existe
     let cache = load_cache();

@@ -5,7 +5,7 @@ use indexmap::IndexMap;
 use std::ops::{Deref, DerefMut};
 use crossbeam_channel::{unbounded, Sender, Receiver};
 use crate::download::{spawn_workers, DownloadJob, DownloadEvent};
-use crate::path_vars::PATHS;
+use crate::paths_vars::PATHS;
 
 #[derive(Debug, Clone)]
 pub enum ModStatus {
@@ -48,7 +48,11 @@ pub struct ModUpdaterApp {
 
 impl ModUpdaterApp {
     pub fn new(mods: IndexMap<String, ModInfo>) -> Self {
-        let mc_versions = get_minecraft_versions(PATHS.versions_folder.join("version_manifest_V2.json"));
+        let mc_versions = get_minecraft_versions(&PATHS.versions_folder
+            .join("version_manifest_V2.json")
+            .to_string_lossy()
+            .to_string()
+        );
         let selected_mc_version = mc_versions.get(0).cloned().unwrap_or_else(|| "1.20.2".to_string());
         let ui_mods: IndexMap<String, UiModInfo> = mods.into_iter().map(|(k, v)| (k, UiModInfo::from(v))).collect();
 
@@ -85,11 +89,11 @@ impl eframe::App for ModUpdaterApp {
                         for (k, m) in self.mods.clone().into_iter() {
                             if m.selected {
                                 crate::manage_mods::prepare_output_folder(&self.selected_mc_version);
-                                let output_folder = format!(r"C:\Users\Mario\AppData\Roaming\.minecraft\modpacks\mods{}", self.selected_mc_version);
+                                let output_folder_path = PATHS.modpacks_folder.join(format!(r"mods{}", self.selected_mc_version));
                                 let job = DownloadJob {
                                     key: k.clone(),
                                     modinfo: m.inner.clone(),
-                                    output_folder,
+                                    output_folder: output_folder_path.to_string_lossy().to_string(),
                                     selected_version: self.selected_mc_version.clone()
                                 };
                                 let _ = self.tx_jobs.send(job);

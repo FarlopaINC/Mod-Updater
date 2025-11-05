@@ -1,3 +1,5 @@
+use crate::paths_vars::PATHS;
+
 use std::fs;
 use indexmap::IndexMap;
 use serde::{Serialize, Deserialize};
@@ -5,7 +7,13 @@ use std::fs::File;
 use zip::ZipArchive;
 use std::io::Read;
 use std::path::Path;
-// no extra imports needed here
+
+#[cfg(target_family = "unix")]
+use std::os::unix::fs::symlink as symlink;
+
+#[cfg(target_family = "windows")]
+use std::os::windows::fs::symlink_dir as symlink;
+
 
 // Información básica de un mod
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -131,10 +139,10 @@ pub fn get_minecraft_versions(manifest_path: &str) -> Vec<String> {
 }
 
 pub fn prepare_output_folder(version: &str) {
-    let base_path = r"C:\Users\Mario\AppData\Roaming\.minecraft\modpacks";
+    let base_path = PATHS.modpacks_folder.to_string_lossy().to_string();
     // Crear carpeta base si no existe
-    if !Path::new(base_path).exists() {
-        fs::create_dir_all(base_path).expect("ERROR: No se pudo crear la carpeta modpacks");
+    if !Path::new(&base_path).exists() {
+        fs::create_dir_all(&base_path).expect("ERROR: No se pudo crear la carpeta modpacks");
     }
     
     let output_folder = format!("{}/mods{}", base_path, version);
@@ -142,3 +150,50 @@ pub fn prepare_output_folder(version: &str) {
         fs::create_dir(&output_folder).expect("ERROR: No se pudo crear la carpeta de versión");
     } 
 }   
+
+/* 
+SELECTOR
+*/
+
+pub fn list_modpacks() -> Vec<String> {
+    let modpacks_folder = &PATHS.modpacks_folder;
+    if !modpacks_folder.exists() {
+        return vec![];
+    }
+
+    let entries = fs::read_dir(modpacks_folder)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().unwrap().is_dir())
+        .filter(|entry| entry.file_name().to_str().unwrap().starts_with("mods"))
+        .map(|entry| entry.file_name().to_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+
+    let mut sorted = entries;
+    sorted.sort();
+    return sorted;
+}
+
+pub fn change_mods(modpack: &str) {
+    // Si ya existe un enlace simbólico, lo eliminamos
+    if let Ok(metadata) = std::fs::symlink_metadata(&PATHS.mods_folder) {
+        if metadata.file_type().is_symlink() {
+            if let Err(e) = std::fs::remove_file(&PATHS.mods_folder) {
+                println!("Error al eliminar el enlace anterior: {}", e);
+                return;
+            }
+        } else {
+            println!("Advertencia: '{}' no es un enlace simbólico, no se eliminará.", &PATHS.mods_folder.display());
+            return;
+        }
+    }
+
+    match symlink(&PATHS.modpacks_folder.join(modpack), &PATHS.mods_folder) { // source, target
+        Ok(_) => {
+            println!("Mods cambiados a: {}", modpack);
+        }
+        Err(e) => {
+            println!("Error al cambiar los mods: {}", e);
+        }
+    }
+}

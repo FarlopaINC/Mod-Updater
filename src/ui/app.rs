@@ -1,6 +1,7 @@
 use eframe::{egui, egui::CentralPanel};
 use eframe::egui::ScrollArea;
-use crate::manage_mods::{get_minecraft_versions, ModInfo};
+use eframe::egui::SidePanel;
+use crate::manage_mods::{change_mods, list_modpacks, get_minecraft_versions, ModInfo};
 use indexmap::IndexMap;
 use std::ops::{Deref, DerefMut};
 use crossbeam_channel::{unbounded, Sender, Receiver};
@@ -61,12 +62,48 @@ impl ModUpdaterApp {
         let (tx_events, rx_events) = unbounded();
         spawn_workers(4, rx_jobs, tx_events);
 
-        Self { mods: ui_mods, mc_versions, selected_mc_version, tx_jobs, rx_events }
+        return Self { mods: ui_mods, mc_versions, selected_mc_version, tx_jobs, rx_events };
     }
 }
 
 impl eframe::App for ModUpdaterApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Panel lateral derecho: Selector de modpacks
+        SidePanel::right("selector_modpacks")
+            .resizable(false)
+            .default_width(180.0)
+            .show(ctx, |ui| {
+                ui.heading("Modpacks");
+                ui.add_space(5.0);
+
+                let modpacks = list_modpacks();
+
+                if modpacks.is_empty() {
+                    ui.label("No hay modpacks disponibles");
+                } else {
+                    ScrollArea::vertical().show(ui, |ui| {
+                        for mp in modpacks {
+                            ui.horizontal(|ui| {
+                                let seleccionado = PATHS.mods_folder
+                                    .read_link()
+                                    .map(|link| link.ends_with(&mp))
+                                    .unwrap_or(false);
+
+                                if seleccionado {
+                                    ui.label(format!("{} ✅", mp));
+                                } else {
+                                    ui.label(&mp);
+                                    if ui.button("Cambiar").clicked() {
+                                        change_mods(&mp); 
+                                    }
+                                }
+                            });
+                            ui.separator();
+                        }
+                    });
+                }
+            });
+
         CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Versión de Minecraft:");

@@ -163,29 +163,33 @@ impl eframe::App for ModUpdaterApp {
             
 
                 //ui.add_space(4.0);
-                if ui.button("🔁").clicked() {
-                    let detected = read_mods_in_folder(&PATHS.mods_folder.to_string_lossy().to_string());
-                    let ui_mods: IndexMap<String, UiModInfo> = detected.into_iter().map(|(k, v)| (k, UiModInfo::from(v))).collect();
-                    self.mods = ui_mods;
-                    self.status_msg = "Lista de mods actualizada".to_string();
+                if ui.button("🔁")
+                    .on_hover_text("Actualiza la lista de mods leyendo la carpeta actual.")
+                    .clicked() {
+                        let detected = read_mods_in_folder(&PATHS.mods_folder.to_string_lossy().to_string());
+                        let ui_mods: IndexMap<String, UiModInfo> = detected.into_iter().map(|(k, v)| (k, UiModInfo::from(v))).collect();
+                        self.mods = ui_mods;
+                        self.status_msg = "Lista de mods actualizada".to_string();
                 }
 
                 //ui.add_space(4.0);
-                if ui.button("⬇").clicked() {
-                    // Encolar trabajos para los mods seleccionados
-                    for (k, m) in self.mods.clone().into_iter() {
-                        if m.selected {
-                            crate::manage_mods::prepare_output_folder(&self.selected_mc_version);
-                            let output_folder_path = PATHS.modpacks_folder.join(format!(r"mods{}", self.selected_mc_version));
-                            let job = DownloadJob {
-                                key: k.clone(),
-                                modinfo: m.inner.clone(),
-                                output_folder: output_folder_path.to_string_lossy().to_string(),
-                                selected_version: self.selected_mc_version.clone()
-                            };
-                            let _ = self.tx_jobs.send(job);
+                if ui.button("⬇")
+                    .on_hover_text("Descarga los mods seleccionados en la versión escogida.")
+                    .clicked() {
+                        // Encolar trabajos para los mods seleccionados
+                        for (k, m) in self.mods.clone().into_iter() {
+                            if m.selected {
+                                crate::manage_mods::prepare_output_folder(&self.selected_mc_version);
+                                let output_folder_path = PATHS.modpacks_folder.join(format!(r"mods{}", self.selected_mc_version));
+                                let job = DownloadJob {
+                                    key: k.clone(),
+                                    modinfo: m.inner.clone(),
+                                    output_folder: output_folder_path.to_string_lossy().to_string(),
+                                    selected_version: self.selected_mc_version.clone()
+                                };
+                                let _ = self.tx_jobs.send(job);
+                            }
                         }
-                    }
                 }
             });
 

@@ -174,26 +174,52 @@ pub fn list_modpacks() -> Vec<String> {
     return sorted;
 }
 
-pub fn change_mods(modpack: &str) {
-    // Si ya existe un enlace simbólico, lo eliminamos
-    if let Ok(metadata) = std::fs::symlink_metadata(&PATHS.mods_folder) {
+pub fn change_mods(modpack: &str) -> Result<String, String> {
+    let target = &PATHS.mods_folder;
+    let source = &PATHS.modpacks_folder.join(modpack);
+
+    // Si ya existe un enlace simbólico, intentamos eliminarlo; si no es symlink, continuamos
+    if let Ok(metadata) = std::fs::symlink_metadata(target) {
         if metadata.file_type().is_symlink() {
-            if let Err(e) = std::fs::remove_file(&PATHS.mods_folder) {
-                println!("Error al eliminar el enlace anterior: {}", e);
-                return;
-            }
-        } else {
-            println!("Advertencia: '{}' no es un enlace simbólico, no se eliminará.", &PATHS.mods_folder.display());
-            return;
+            // intentar eliminar como archivo primero, si falla, intentar como dir
+            let _ = std::fs::remove_file(target).or_else(|_| std::fs::remove_dir(target));
         }
     }
 
-    match symlink(&PATHS.modpacks_folder.join(modpack), &PATHS.mods_folder) { // source, target
+    // Intentar crear enlace simbólico / junction (rápido)
+    match symlink(source, target) {
         Ok(_) => {
-            println!("Mods cambiados a: {}", modpack);
+            return Ok(format!("Mods cambiados a '{}' usando enlace/junction.", modpack));
         }
         Err(e) => {
-            println!("Error al cambiar los mods: {}", e);
+            // Fallback: intentar copiar el modpack preservando el origen (no usar rename)
+            match copy_modpack_all(source, target) {
+                Ok(()) => Ok(format!("Mods cambiados a '{}' usando fallback (copia preservando original).", modpack)),
+                Err(e2) => Err(format!("No se pudo cambiar mods: symlink/junction falló ({:?}), fallback (copia) falló ({:?})", e, e2)),
+            }
         }
     }
 }
+
+// Copia recursiva de directorios (archivo por archivo). No sigue symlinks.
+pub fn copy_modpack_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    if (&PATHS.mods_folder).exists() {
+        std::fs::remove_dir_all(&PATHS.mods_folder)?;
+    }
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_modpack_all(&from, &to)?;
+        } else if ty.is_file() {
+            std::fs::copy(&from, &to)?;
+        } else {
+            // Ignorar otros tipos (symlinks, etc.)
+        }
+    }
+    Ok(())
+}
+

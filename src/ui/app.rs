@@ -1,7 +1,7 @@
 use eframe::{egui, egui::CentralPanel};
 use eframe::egui::ScrollArea;
 use eframe::egui::SidePanel;
-use crate::manage_mods::{change_mods, list_modpacks, get_minecraft_versions, ModInfo};
+use crate::manage_mods::{change_mods, copy_modpack_all, list_modpacks, get_minecraft_versions, read_mods_in_folder, ModInfo};
 use indexmap::IndexMap;
 use std::ops::{Deref, DerefMut};
 use crossbeam_channel::{unbounded, Sender, Receiver};
@@ -39,12 +39,20 @@ impl DerefMut for UiModInfo {
     fn deref_mut(&mut self) -> &mut ModInfo { &mut self.inner }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeMode {
+    Symlink, // intenta enlace/junction y hace fallback a rename/copia
+    Copy,    // fuerza la copia (preserva el modpack original)
+}
+
 pub struct ModUpdaterApp {
     pub mods: IndexMap<String, UiModInfo>,
     pub mc_versions: Vec<String>,
     pub selected_mc_version: String,
     tx_jobs: Sender<DownloadJob>,
     rx_events: Receiver<DownloadEvent>,
+    pub change_mode: ChangeMode,
+    pub status_msg: String,
 }
 
 impl ModUpdaterApp {
@@ -62,7 +70,7 @@ impl ModUpdaterApp {
         let (tx_events, rx_events) = unbounded();
         spawn_workers(4, rx_jobs, tx_events);
 
-        return Self { mods: ui_mods, mc_versions, selected_mc_version, tx_jobs, rx_events };
+        return Self { mods: ui_mods, mc_versions, selected_mc_version, tx_jobs, rx_events, change_mode: ChangeMode::Symlink, status_msg: String::new() };
     }
 }
 
@@ -75,6 +83,24 @@ impl eframe::App for ModUpdaterApp {
             .show(ctx, |ui| {
                 ui.heading("Modpacks");
                 ui.add_space(5.0);
+
+                // Selector de modo de cambio (tooltip explica las opciones)
+                ui.horizontal(|ui| {
+                    ui.label("MODO:").on_hover_text("Enlace: intenta crear un acceso directo del modpack que sustituya la carpeta de \"mods\" (rapido). Si no funciona se usa el modo \"copiar\".
+                        \nCopiar: copia y pega los modpacks completos en la carpeta \"mods\" (mas lento pero funciona siempre).");
+
+                    egui::ComboBox::from_id_salt("change-mode")
+                        .selected_text(match self.change_mode {
+                            ChangeMode::Symlink => "Enlace",
+                            ChangeMode::Copy => "Copiar",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.change_mode, ChangeMode::Symlink, "Enlace");
+                            ui.selectable_value(&mut self.change_mode, ChangeMode::Copy, "Copiar");
+                        });
+                });
+
+                ui.add_space(6.0);
 
                 let modpacks = list_modpacks();
 
@@ -94,7 +120,17 @@ impl eframe::App for ModUpdaterApp {
                                 } else {
                                     ui.label(&mp);
                                     if ui.button("Cambiar").clicked() {
-                                        change_mods(&mp); 
+                                        self.status_msg = match self.change_mode {
+                                            ChangeMode::Symlink => change_mods(&mp).unwrap(),
+                                            ChangeMode::Copy => {
+                                                let target = &PATHS.mods_folder;
+                                                let source = &PATHS.modpacks_folder.join(&mp);
+                                                match copy_modpack_all(source, target) {
+                                                    Ok(()) => format!("Mods cambiados a '{}'.", &mp),
+                                                    Err(e) => format!("Error al copiar modpack: {}", e),
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             });
@@ -102,11 +138,18 @@ impl eframe::App for ModUpdaterApp {
                         }
                     });
                 }
+                // Mostrar mensaje de estado
+                if !self.status_msg.is_empty() {
+                    ui.separator();
+                    ui.label(&self.status_msg);
+                }     
             });
 
         CentralPanel::default().show(ctx, |ui| {
+            ui.heading("Mods instalados");
+            ui.add_space(2.0);
             ui.horizontal(|ui| {
-                ui.label("Versión de Minecraft:");
+                ui.label("Versión:");
                 egui::ComboBox::from_id_salt("mc-version-box")
                     .selected_text(&self.selected_mc_version)
                     .show_ui(ui, |ui| {
@@ -117,31 +160,36 @@ impl eframe::App for ModUpdaterApp {
                         ui.label("Personalizada:");
                         ui.text_edit_singleline(&mut self.selected_mc_version);
                     });
-            });
+            
 
-            ui.horizontal(|ui| {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("💾 Actualizar seleccionados").clicked() {
-                        // Encolar trabajos para los mods seleccionados
-                        for (k, m) in self.mods.clone().into_iter() {
-                            if m.selected {
-                                crate::manage_mods::prepare_output_folder(&self.selected_mc_version);
-                                let output_folder_path = PATHS.modpacks_folder.join(format!(r"mods{}", self.selected_mc_version));
-                                let job = DownloadJob {
-                                    key: k.clone(),
-                                    modinfo: m.inner.clone(),
-                                    output_folder: output_folder_path.to_string_lossy().to_string(),
-                                    selected_version: self.selected_mc_version.clone()
-                                };
-                                let _ = self.tx_jobs.send(job);
-                            }
+                //ui.add_space(4.0);
+                if ui.button("🔁").clicked() {
+                    let detected = read_mods_in_folder(&PATHS.mods_folder.to_string_lossy().to_string());
+                    let ui_mods: IndexMap<String, UiModInfo> = detected.into_iter().map(|(k, v)| (k, UiModInfo::from(v))).collect();
+                    self.mods = ui_mods;
+                    self.status_msg = "Lista de mods actualizada".to_string();
+                }
+
+                //ui.add_space(4.0);
+                if ui.button("⬇").clicked() {
+                    // Encolar trabajos para los mods seleccionados
+                    for (k, m) in self.mods.clone().into_iter() {
+                        if m.selected {
+                            crate::manage_mods::prepare_output_folder(&self.selected_mc_version);
+                            let output_folder_path = PATHS.modpacks_folder.join(format!(r"mods{}", self.selected_mc_version));
+                            let job = DownloadJob {
+                                key: k.clone(),
+                                modinfo: m.inner.clone(),
+                                output_folder: output_folder_path.to_string_lossy().to_string(),
+                                selected_version: self.selected_mc_version.clone()
+                            };
+                            let _ = self.tx_jobs.send(job);
                         }
                     }
-                });
+                }
             });
 
-            ui.add_space(8.0); // Espacio entre el botón y la lista
-            ui.label("Mods instalados");
+            ui.add_space(8.0);
             ScrollArea::vertical().show(ui, |ui| {
                 let keys: Vec<String> = self.mods.keys().cloned().collect();
                 for key in keys {

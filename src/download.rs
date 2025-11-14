@@ -7,10 +7,9 @@ use crate::utils::modrinth_api;
 #[derive(Debug, Clone)]
 pub enum DownloadEvent {
     Resolving { key: String },
-    Resolved { key: String, project_id: String },
+    Resolved { key: String },
     Started { key: String },
-    Progress { key: String, progress: f32 },
-    Done { key: String, path: String },
+    Done { key: String },
     Error { key: String, msg: String },
 }
 
@@ -36,7 +35,7 @@ pub fn spawn_workers(n: usize, rx: Receiver<DownloadJob>, tx_events: Sender<Down
                     let _ = tx.send(DownloadEvent::Resolving { key: key.clone() });
                     if let Some(pid) = modrinth_api::fetch_modrinth_project_id(&mi.name) {
                         mi.confirmed_project_id = Some(pid.clone());
-                        let _ = tx.send(DownloadEvent::Resolved { key: key.clone(), project_id: pid.clone() });
+                        let _ = tx.send(DownloadEvent::Resolved { key: key.clone() });
                     } else {
                         let _ = tx.send(DownloadEvent::Error { key: key.clone(), msg: format!("No se pudo resolver project_id para {}", mi.name) });
                         continue;
@@ -55,8 +54,7 @@ pub fn spawn_workers(n: usize, rx: Receiver<DownloadJob>, tx_events: Sender<Down
                                 let res = modrinth_api::download_mod_file(&file.url, &job.output_folder, filename);
                                 match res {
                                     Ok(_) => {
-                                        let dest = format!("{}/{}", job.output_folder, filename);
-                                        let _ = tx.send(DownloadEvent::Done { key: key.clone(), path: dest });
+                                        let _ = tx.send(DownloadEvent::Done { key: key.clone() });
                                         // update cache? skipping here; caller should update
                                     }
                                     Err(e) => {

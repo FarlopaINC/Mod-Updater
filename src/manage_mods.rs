@@ -189,16 +189,43 @@ pub fn change_mods(modpack: &str) -> Result<String, String> {
     // Intentar crear enlace simbólico / junction (rápido)
     match symlink(source, target) {
         Ok(_) => {
+            let _ = write_active_marker(modpack);
             return Ok(format!("Mods cambiados a '{}' usando enlace/junction.", modpack));
         }
         Err(e) => {
             // Fallback: intentar copiar el modpack preservando el origen (no usar rename)
             match copy_modpack_all(source, target) {
-                Ok(()) => Ok(format!("Mods cambiados a '{}' usando fallback (copia preservando original).", modpack)),
+                Ok(()) => {
+                    let _ = write_active_marker(modpack);
+                    Ok(format!("Mods cambiados a '{}' usando fallback (copia preservando original).", modpack))
+                }
                 Err(e2) => Err(format!("No se pudo cambiar mods: symlink/junction falló ({:?}), fallback (copia) falló ({:?})", e, e2)),
             }
         }
     }
+}
+
+// Marker file helpers: write/read the active modpack name so UI can detect active pack after copy
+fn active_marker_path() -> std::path::PathBuf {
+    PATHS.base_game_folder.join("mods_updater_active_modpack.txt")
+}
+
+fn write_active_marker(modpack: &str) -> std::io::Result<()> {
+    let p = active_marker_path();
+    if let Some(parent) = p.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(p, modpack.as_bytes())
+}
+
+pub fn read_active_marker() -> Option<String> {
+    let p = active_marker_path();
+    if p.exists() {
+        if let Ok(s) = std::fs::read_to_string(p) {
+            return Some(s.trim().to_string());
+        }
+    }
+    None
 }
 
 // Copia recursiva de directorios (archivo por archivo). No sigue symlinks.

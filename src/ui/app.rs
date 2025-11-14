@@ -1,7 +1,7 @@
 use eframe::{egui, egui::CentralPanel};
 use eframe::egui::ScrollArea;
 use eframe::egui::SidePanel;
-use crate::manage_mods::{change_mods, copy_modpack_all, list_modpacks, get_minecraft_versions, read_mods_in_folder, ModInfo};
+use crate::manage_mods::{change_mods, copy_modpack_all, list_modpacks, get_minecraft_versions, read_mods_in_folder, read_active_marker, ModInfo};
 use indexmap::IndexMap;
 use std::ops::{Deref, DerefMut};
 use crossbeam_channel::{unbounded, Sender, Receiver};
@@ -110,10 +110,13 @@ impl eframe::App for ModUpdaterApp {
                     ScrollArea::vertical().show(ui, |ui| {
                         for mp in modpacks {
                             ui.horizontal(|ui| {
-                                let seleccionado = PATHS.mods_folder
-                                    .read_link()
-                                    .map(|link| link.ends_with(&mp))
-                                    .unwrap_or(false);
+                                let seleccionado = match PATHS.mods_folder.read_link() {
+                                    Ok(link) => link.ends_with(&mp),
+                                    Err(_) => match read_active_marker() {
+                                        Some(active) => active == mp,
+                                        None => false,
+                                    },
+                                };
 
                                 if seleccionado {
                                     ui.label(format!("{} ✅", mp));
@@ -149,7 +152,7 @@ impl eframe::App for ModUpdaterApp {
             ui.heading("Mods instalados");
             ui.add_space(2.0);
             ui.horizontal(|ui| {
-                ui.label("Versión:");
+                ui.label("Versión:").on_hover_text("Versión a la que se va a actualizar");
                 egui::ComboBox::from_id_salt("mc-version-box")
                     .selected_text(&self.selected_mc_version)
                     .show_ui(ui, |ui| {
@@ -162,7 +165,7 @@ impl eframe::App for ModUpdaterApp {
                     });
             
 
-                //ui.add_space(4.0);
+                
                 if ui.button("🔁")
                     .on_hover_text("Actualiza la lista de mods leyendo la carpeta actual.")
                     .clicked() {
@@ -172,7 +175,7 @@ impl eframe::App for ModUpdaterApp {
                         self.status_msg = "Lista de mods actualizada".to_string();
                 }
 
-                //ui.add_space(4.0);
+                
                 if ui.button("⬇")
                     .on_hover_text("Descarga los mods seleccionados en la versión escogida.")
                     .clicked() {
@@ -190,6 +193,18 @@ impl eframe::App for ModUpdaterApp {
                                 let _ = self.tx_jobs.send(job);
                             }
                         }
+                }
+            
+                let all_selected = self.mods.values().all(|m| m.selected);
+                let select_label = if all_selected { "✅" } else { "⬜" };
+                if ui.button(select_label)
+                    .on_hover_text("Alterna la selección de todos los mods")
+                    .clicked() {
+                    if all_selected {
+                        for m in self.mods.values_mut() { m.selected = false; }                       
+                    } else {
+                        for m in self.mods.values_mut() { m.selected = true; }
+                    }
                 }
             });
 
@@ -223,16 +238,13 @@ impl eframe::App for ModUpdaterApp {
                     DownloadEvent::Resolving { key } => {
                         if let Some(m) = self.mods.get_mut(&key) { m.status = ModStatus::Resolving; }
                     }
-                    DownloadEvent::Resolved { key, project_id: _ } => {
+                    DownloadEvent::Resolved { key } => {
                         if let Some(m) = self.mods.get_mut(&key) { m.status = ModStatus::Idle; }
                     }
                     DownloadEvent::Started { key } => {
                         if let Some(m) = self.mods.get_mut(&key) { m.status = ModStatus::Downloading(0.0); }
                     }
-                    DownloadEvent::Progress { key, progress } => {
-                        if let Some(m) = self.mods.get_mut(&key) { m.progress = progress; m.status = ModStatus::Downloading(progress); }
-                    }
-                    DownloadEvent::Done { key, path: _ } => {
+                    DownloadEvent::Done { key } => {
                         if let Some(m) = self.mods.get_mut(&key) { m.status = ModStatus::Done; m.progress = 1.0; }
                     }
                     DownloadEvent::Error { key, msg } => {

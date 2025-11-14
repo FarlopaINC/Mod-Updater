@@ -9,6 +9,7 @@ pub static PATHS: Lazy<Paths> = Lazy::new(|| {
     Paths::new(base)
 });
 
+#[allow(dead_code)]
 pub struct Paths {
     pub base_game_folder: PathBuf,
     pub mods_folder: PathBuf,

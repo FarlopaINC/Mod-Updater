@@ -5,7 +5,7 @@ use crate::manage_mods::{change_mods, copy_modpack_all, list_modpacks, get_minec
 use indexmap::IndexMap;
 use std::ops::{Deref, DerefMut};
 use crossbeam_channel::{unbounded, Sender, Receiver};
-use crate::download::{spawn_workers, DownloadJob, DownloadEvent};
+use crate::fetch::download::{spawn_workers, DownloadJob, DownloadEvent};
 use crate::paths_vars::PATHS;
 
 #[derive(Debug, Clone)]

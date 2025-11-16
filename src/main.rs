@@ -1,9 +1,8 @@
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
 mod manage_mods;
-mod utils;
+mod fetch;
 mod ui;
-mod download;
 mod paths_vars;
 use crate::ui::app::ModUpdaterApp;
 use crate::manage_mods::{read_mods_in_folder, save_cache, load_cache};

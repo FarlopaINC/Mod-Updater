@@ -53,7 +53,7 @@ pub fn spawn_workers(n: usize, rx: Receiver<DownloadJob>, tx_events: Sender<Down
                         }
                     }
                     None => {
-                        let _ = tx.send(DownloadEvent::Error { key: key.clone(), msg: format!("No se encontró '{}' v{} en Modrinth/CurseForge", mi.name, job.selected_version) });
+                        let _ = tx.send(DownloadEvent::Error { key: key.clone(), msg: format!("No se encontró '{}' v{}", mi.name, job.selected_version) });
                     }
                 }
             }

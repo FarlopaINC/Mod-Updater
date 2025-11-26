@@ -45,12 +45,20 @@ pub enum ChangeMode {
     Copy,    // fuerza la copia (preserva el modpack original)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeletionConfirmation {
+    None,
+    Modpack(String),
+    SelectedMods,
+}
+
 pub struct ModUpdaterApp {
     pub mods: IndexMap<String, UiModInfo>,
     pub mc_versions: Vec<String>,
     pub selected_mc_version: String,
     tx_jobs: Sender<DownloadJob>,
     rx_events: Receiver<DownloadEvent>,
+    deletion_confirmation: DeletionConfirmation,
     pub change_mode: ChangeMode,
     pub status_msg: String,
 }
@@ -70,13 +78,14 @@ impl ModUpdaterApp {
         let (tx_events, rx_events) = unbounded();
         spawn_workers(4, rx_jobs, tx_events);
 
-        return Self { mods: ui_mods, mc_versions, selected_mc_version, tx_jobs, rx_events, change_mode: ChangeMode::Symlink, status_msg: String::new() };
+        return Self { mods: ui_mods, mc_versions, selected_mc_version, tx_jobs, rx_events, deletion_confirmation: DeletionConfirmation::None, change_mode: ChangeMode::Symlink, status_msg: String::new() };
     }
 }
 
 impl eframe::App for ModUpdaterApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Panel lateral derecho: Selector de modpacks
+        let is_confirming_deletion = self.deletion_confirmation != DeletionConfirmation::None;
         SidePanel::right("selector_modpacks")
             .resizable(false)
             .default_width(180.0)
@@ -117,7 +126,6 @@ impl eframe::App for ModUpdaterApp {
                                         None => false,
                                     },
                                 };
-
                                 if seleccionado {
                                     ui.label(format!("{} ✅", mp));
                                 } else {
@@ -136,6 +144,12 @@ impl eframe::App for ModUpdaterApp {
                                         }
                                     }
                                 }
+
+                                // Button to delete this modpack
+                                ui.add_space(4.0);
+                                if ui.button("🗑").clicked() {
+                                    self.deletion_confirmation = DeletionConfirmation::Modpack(mp.clone());
+                                }
                             });
                             ui.separator();
                         }
@@ -147,6 +161,7 @@ impl eframe::App for ModUpdaterApp {
                     ui.label(&self.status_msg);
                 }     
             });
+        ctx.request_repaint(); // Para que la UI se actualice mientras se descarga
 
         CentralPanel::default().show(ctx, |ui| {
             ui.heading("Mods instalados");
@@ -163,15 +178,14 @@ impl eframe::App for ModUpdaterApp {
                         ui.label("Personalizada:");
                         ui.text_edit_singleline(&mut self.selected_mc_version);
                     });
-            
-
+        
                 
                 if ui.button("🔁")
                     .on_hover_text("Actualiza la lista de mods leyendo la carpeta actual.")
                     .clicked() {
                         let detected = read_mods_in_folder(&PATHS.mods_folder.to_string_lossy().to_string());
                         let ui_mods: IndexMap<String, UiModInfo> = detected.into_iter().map(|(k, v)| (k, UiModInfo::from(v))).collect();
-                        self.mods = ui_mods;
+                        self.mods = ui_mods; 
                         self.status_msg = "Lista de mods actualizada".to_string();
                 }
 
@@ -194,7 +208,13 @@ impl eframe::App for ModUpdaterApp {
                             }
                         }
                 }
-            
+                // Button to delete selected mods
+                if ui.button("🗑")
+                    .on_hover_text("Elimina los archivos .jar de los mods seleccionados")
+                    .clicked() {
+                    self.deletion_confirmation = DeletionConfirmation::SelectedMods;
+                }
+
                 let all_selected = self.mods.values().all(|m| m.selected);
                 let select_label = if all_selected { "✅" } else { "⬜" };
                 if ui.button(select_label)
@@ -253,5 +273,71 @@ impl eframe::App for ModUpdaterApp {
                 }
             }
         });
+
+        // --- Ventana de confirmación de borrado ---
+        if is_confirming_deletion {
+            egui::Window::new("Confirmar borrado")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ctx, |ui| {
+                    let message = match &self.deletion_confirmation {
+                        DeletionConfirmation::Modpack(name) => format!("¿Seguro que quieres borrar el modpack '{}'?", name),
+                        DeletionConfirmation::SelectedMods => "¿Seguro que quieres borrar los mods seleccionados?".to_string(),
+                        DeletionConfirmation::None => "".to_string(),
+                    };
+                    ui.label(message);
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancelar").clicked() {
+                            self.deletion_confirmation = DeletionConfirmation::None;
+                        }
+                        ui.add_space(10.0);
+                        if ui.button("Aceptar").clicked() {
+                            match self.deletion_confirmation.clone() {
+                                DeletionConfirmation::Modpack(mp_name) => {
+                                    let target = PATHS.modpacks_folder.join(&mp_name);
+                                    match std::fs::remove_dir_all(&target) {
+                                        Ok(_) => { self.status_msg = format!("Modpack '{}' borrado.", mp_name); }
+                                        Err(e) => { self.status_msg = format!("Error borrando modpack '{}': {}", mp_name, e); }
+                                    }
+                                }
+                                DeletionConfirmation::SelectedMods => {
+                                    let mut removed_keys: Vec<String> = Vec::new();
+                                    // Usamos retain_mut para iterar y modificar en el mismo lugar
+                                    self.mods.retain(|key, m| {
+                                        if m.selected {
+                                            // Usamos la ruta canónica para asegurar que borramos el archivo real
+                                            // incluso si `mods` es un enlace simbólico.
+                                            let path = match PATHS.mods_folder.canonicalize() {
+                                                Ok(p) => p.join(key),
+                                                Err(_) => PATHS.mods_folder.join(key), // Fallback a la ruta normal
+                                            };
+
+                                            match std::fs::remove_file(&path) {
+                                                Ok(_) => {
+                                                    removed_keys.push(key.clone());
+                                                    false // Eliminar de self.mods
+                                                },
+                                                Err(e) => {
+                                                    self.status_msg = format!("Error borrando {}: {}", key, e);
+                                                    true // Mantener en self.mods si hay error
+                                                }
+                                            }
+                                        } else {
+                                            true // Mantener si no está seleccionado
+                                        }
+                                    });
+                                    if !removed_keys.is_empty() {
+                                        self.status_msg = format!("Borrados {} mods seleccionados.", removed_keys.len());
+                                    }
+                                }
+                                _ => {}
+                            }
+                            self.deletion_confirmation = DeletionConfirmation::None;
+                        }
+                    });
+                });
+        }
     }
 }

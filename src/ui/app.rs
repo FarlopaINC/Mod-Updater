@@ -71,12 +71,38 @@ impl ModUpdaterApp {
             .to_string()
         );
         let selected_mc_version = mc_versions.get(0).cloned().unwrap_or_else(|| "1.20.2".to_string());
-        let ui_mods: IndexMap<String, UiModInfo> = mods.into_iter().map(|(k, v)| (k, UiModInfo::from(v))).collect();
+        // Merge with cache (if present) so we keep confirmed IDs / remote version info
+        let cache = crate::manage_mods::load_cache();
+        let mut ui_mods: IndexMap<String, UiModInfo> = IndexMap::new();
+        for (k, v) in mods.into_iter() {
+            if let Some(cached) = cache.get(&k) {
+                let mut merged = cached.clone();
+                // preserve current selection state from detected folder
+                merged.selected = v.selected;
+                ui_mods.insert(k.clone(), UiModInfo::from(merged));
+            } else {
+                ui_mods.insert(k.clone(), UiModInfo::from(v));
+            }
+        }
 
-        // create channels and spawn workers
+        // create channels
         let (tx_jobs, rx_jobs) = unbounded();
         let (tx_events, rx_events) = unbounded();
-        spawn_workers(4, rx_jobs, tx_events);
+
+        // Compute worker count based on system and number of mods
+        let mods_count = ui_mods.len();
+        let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        // Downloads are IO-bound: allow several threads per CPU but cap to avoid excess
+        let mut workers = std::cmp::min(mods_count.max(1), cpus.saturating_mul(4));
+        if workers == 0 { workers = 1; }
+        if workers > 32 { workers = 32; }
+
+        spawn_workers(workers, rx_jobs, tx_events);
+
+        // persist any new entries in cache (optional)
+        let mut map_for_save: IndexMap<String, ModInfo> = IndexMap::new();
+        for (k, v) in &ui_mods { map_for_save.insert(k.clone(), v.inner.clone()); }
+        crate::manage_mods::save_cache(&map_for_save);
 
         return Self { mods: ui_mods, mc_versions, selected_mc_version, tx_jobs, rx_events, deletion_confirmation: DeletionConfirmation::None, change_mode: ChangeMode::Symlink, status_msg: String::new() };
     }
@@ -263,6 +289,17 @@ impl eframe::App for ModUpdaterApp {
                     }
                     DownloadEvent::Started { key } => {
                         if let Some(m) = self.mods.get_mut(&key) { m.status = ModStatus::Downloading(0.0); }
+                    }
+                    DownloadEvent::ResolvedInfo { key, confirmed_project_id, version_remote } => {
+                        if let Some(m) = self.mods.get_mut(&key) {
+                            m.inner.confirmed_project_id = confirmed_project_id.clone();
+                            m.inner.version_remote = version_remote.clone();
+
+                            // Save updated cache to disk (UI thread owns cache writes)
+                            let mut map_for_save: IndexMap<String, crate::manage_mods::ModInfo> = IndexMap::new();
+                            for (k, v) in &self.mods { map_for_save.insert(k.clone(), v.inner.clone()); }
+                            crate::manage_mods::save_cache(&map_for_save);
+                        }
                     }
                     DownloadEvent::Done { key } => {
                         if let Some(m) = self.mods.get_mut(&key) { m.status = ModStatus::Done; m.progress = 1.0; }

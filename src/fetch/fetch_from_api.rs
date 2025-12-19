@@ -18,14 +18,14 @@ pub struct ModDownloadInfo {
 }
 
 /// Intenta encontrar un mod, primero en Modrinth, y si falla, en CurseForge.
-pub fn find_mod_download(mod_name: &str, game_version: &str, curseforge_api_key: &str) -> Option<ModDownloadInfo> {
-    println!("🔍 Buscando '{}' v{} en Modrinth...", mod_name, game_version);
+pub fn find_mod_download(mod_name: &str, mod_id: Option<&str>, game_version: &str, curseforge_api_key: &str) -> Option<ModDownloadInfo> {
+    println!("🔍 Procesando '{}' (ID: {:?}) v{}...", mod_name, mod_id.unwrap_or("N/A"), game_version);
     
-    // --- 1. Intento con Modrinth ---
-    if let Some(modrinth_id) = fetch_modrinth_project_id(mod_name) {
-        if let Some(modrinth_version) = fetch_modrinth_version(&modrinth_id, game_version) {
+    // Helper para verificar y descargar
+    let try_find_version = |hit: &ModrinthSearchHit| -> Option<ModDownloadInfo> {
+        if let Some(modrinth_version) = fetch_modrinth_version(&hit.project_id, game_version) {
             if let Some(file) = modrinth_version.first_file() {
-                println!("✅ Encontrado en Modrinth: {}", file.filename);
+                println!("✅ Encontrado en Modrinth: {} (Project: {})", file.filename, hit.title);
                 // Convertimos del tipo `ModFile` a nuestro tipo unificado
                 return Some(ModDownloadInfo {
                     filename: file.filename.clone(),
@@ -33,18 +33,41 @@ pub fn find_mod_download(mod_name: &str, game_version: &str, curseforge_api_key:
                 });
             }
         }
+        None
+    };
+
+    // --- 1. Intento por ID (Si existe) ---
+    if let Some(id) = mod_id {
+        let hits = search_modrinth_project(id);
+        for hit in &hits {
+            if hit.slug == id {
+                 if let Some(info) = try_find_version(hit) {
+                     return Some(info);
+                 }
+            }
+        }
+    }
+
+    // --- 2. Intento por Nombre (Fallback) ---
+    let hits = search_modrinth_project(mod_name);
+    for hit in &hits {
+        let slug_match = mod_id.map_or(false, |id| hit.slug == id);
+        let name_match = hit.title.to_lowercase().contains(&mod_name.to_lowercase()) || mod_name.to_lowercase().contains(&hit.title.to_lowercase());
+
+        if slug_match || name_match {
+            if let Some(info) = try_find_version(hit) {
+                return Some(info);
+            }
+        }
     }
     
     println!("⚠️ No encontrado en Modrinth. Probando en CurseForge...");
 
-    // --- 2. Intento con CurseForge (Fallback) ---
+    // --- 3. Intento con CurseForge (Fallback) ---
     if let Some(curseforge_id) = fetch_curseforge_project_id(mod_name, curseforge_api_key) {
         if let Some(curse_file) = fetch_curseforge_version_file(curseforge_id, game_version, curseforge_api_key) {
-            
-            // La API de CurseForge a veces devuelve `null` en la URL.
             if let Some(download_url) = curse_file.download_url {
                 println!("✅ Encontrado en CurseForge: {}", curse_file.file_name);
-                // Convertimos del tipo `CurseFile` a nuestro tipo unificado
                 return Some(ModDownloadInfo {
                     filename: curse_file.file_name,
                     url: download_url,
@@ -58,6 +81,7 @@ pub fn find_mod_download(mod_name: &str, game_version: &str, curseforge_api_key:
     println!("❌ No se encontró '{}' en ninguna plataforma.", mod_name);
     return None;
 }
+
 
 // ---- MODULO MODRINTH ----
 
@@ -86,33 +110,47 @@ struct ModrinthSearchResults {
 }
 
 #[derive(Debug, Deserialize)]
-struct ModrinthSearchHit {
-    project_id: String,
+pub struct ModrinthSearchHit {
+    pub project_id: String,
+    pub slug: String,
+    pub title: String,
 }
 
-pub fn fetch_modrinth_project_id(mod_name: &str) -> Option<String> {
-    let search_url = format!("https://api.modrinth.com/v2/search?query={}", mod_name);
-    match get(&search_url) {
+fn build_modrinth_client() -> Client {
+    Client::builder().user_agent("ModsUpdater/1.0 (github.com/FarlopaINC)").build().unwrap()
+}
+
+pub fn search_modrinth_project(query: &str) -> Vec<ModrinthSearchHit> {
+    let client = build_modrinth_client();
+    let search_url = "https://api.modrinth.com/v2/search";
+    
+    // Solicitamos 5 resultados para manejar ambigüedades
+    let params = [
+        ("query", query),
+        ("limit", "5")
+    ];
+
+    match client.get(search_url).query(&params).send() {
         Ok(resp) => {
             if resp.status().is_success() {
                 let results: ModrinthSearchResults = resp.json().unwrap_or(ModrinthSearchResults { hits: vec![] });
-                if let Some(hit) = results.hits.first() {
-                    return Some(hit.project_id.clone());
-                }
+                return results.hits;
             } else {
-                println!("❌ Error al buscar '{}' en la API (status {})", mod_name, resp.status());
+                println!("❌ Error al buscar '{}' en la API (status {})", query, resp.status());
             }
         }
         Err(e) => {
-            println!("❌ Error de conexión al buscar '{}': {}", mod_name, e);
+            println!("❌ Error de conexión al buscar '{}': {}", query, e);
         }
     }
-    return None;
+    return vec![];
 }
 
 pub fn fetch_modrinth_version(mod_id: &str, version: &str) -> Option<ModrinthVersion> {
+    let client = build_modrinth_client();
     let api_url = format!("https://api.modrinth.com/v2/project/{}/version", mod_id);
-    match get(&api_url) {
+
+    match client.get(&api_url).send() {
         Ok(resp) => {
             if resp.status().is_success() {
                 let versions: Vec<ModrinthVersion> = resp.json().unwrap_or_default();
@@ -158,7 +196,7 @@ pub struct CurseFile {
     pub mod_loaders: Vec<String>,
 }
 
-fn build_client(api_key: &str) -> Client {
+fn build_curse_client(api_key: &str) -> Client {
     let mut headers = header::HeaderMap::new();
     headers.insert("x-api-key", header::HeaderValue::from_str(api_key).unwrap());
     Client::builder()
@@ -168,10 +206,16 @@ fn build_client(api_key: &str) -> Client {
 }
 
 pub fn fetch_curseforge_project_id(mod_name: &str, api_key: &str) -> Option<u32> {
-    let client = build_client(api_key);
-    let search_url = format!("https://api.curseforge.com/v1/mods/search?gameId=432&searchFilter={}", mod_name);
+    let client = build_curse_client(api_key);
+    let search_url = "https://api.curseforge.com/v1/mods/search";
+    
+    // Parámetros seguros con codificación automática
+    let params = [
+        ("gameId", "432"),
+        ("searchFilter", mod_name)
+    ];
 
-    match client.get(&search_url).send() {
+    match client.get(search_url).query(&params).send() {
         Ok(resp) => {
             if resp.status().is_success() {
                 let results: ApiResponse<Vec<CurseMod>> = resp.json().unwrap();
@@ -189,10 +233,15 @@ pub fn fetch_curseforge_project_id(mod_name: &str, api_key: &str) -> Option<u32>
 }
 
 pub fn fetch_curseforge_version_file(mod_id: u32, game_version: &str, api_key: &str) -> Option<CurseFile> {
-    let client = build_client(api_key);
-    let api_url = format!("https://api.curseforge.com/v1/mods/{}/files?gameVersion={}&modLoaderType=4", mod_id, game_version);
+    let client = build_curse_client(api_key);
+    let api_url = format!("https://api.curseforge.com/v1/mods/{}/files", mod_id);
 
-    match client.get(&api_url).send() {
+    let params = [
+        ("gameVersion", game_version),
+        ("modLoaderType", "4")
+    ];
+
+    match client.get(&api_url).query(&params).send() {
         Ok(resp) => {
             if resp.status().is_success() {
                 let mut files: ApiResponse<Vec<CurseFile>> = resp.json().unwrap();

@@ -61,7 +61,7 @@ pub fn read_mods_in_folder (mods_folder: &str) -> IndexMap<String, ModInfo> {
                 let mut mod_json_str = String::new();
                 for i in 0..zip.len() {
                     let mut file = zip.by_index(i).expect("No se pudo acceder al archivo dentro del zip");
-                    if file.name().ends_with("fabric.mod.json") {
+                    if Path::new(file.name()).file_name().and_then(|s| s.to_str()) == Some("fabric.mod.json") {
                         file.read_to_string(&mut mod_json_str).expect("No se pudo leer fabric.mod.json");
                         break;
                     }
@@ -249,4 +249,3 @@ pub fn copy_modpack_all(src: &std::path::Path, dst: &std::path::Path) -> std::io
     }
     Ok(())
 }
-

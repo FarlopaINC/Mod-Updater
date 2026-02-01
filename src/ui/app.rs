@@ -1,7 +1,10 @@
 use eframe::{egui, egui::CentralPanel};
-use eframe::egui::ScrollArea;
-use eframe::egui::SidePanel;
-use crate::manage_mods::{change_mods, copy_modpack_all, list_modpacks, get_minecraft_versions, read_mods_in_folder, read_active_marker, ModInfo};
+use eframe::egui::{ScrollArea, SidePanel, TopBottomPanel};
+use crate::manage_mods::{
+    change_mods, list_modpacks, get_minecraft_versions, read_active_marker,
+    spawn_read_workers, ReadJob, ReadEvent,
+    ModInfo, ProfilesDatabase, TroubleshootMemory, load_profiles, save_profiles, load_memory, Profile 
+};
 use indexmap::IndexMap;
 use std::ops::{Deref, DerefMut};
 use crossbeam_channel::{unbounded, Sender, Receiver};
@@ -39,28 +42,53 @@ impl DerefMut for UiModInfo {
     fn deref_mut(&mut self) -> &mut ModInfo { &mut self.inner }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChangeMode {
-    Symlink, // intenta enlace/junction y hace fallback a rename/copia
-    Copy,    // fuerza la copia (preserva el modpack original)
-}
+
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeletionConfirmation {
     None,
     Modpack(String),
     SelectedMods,
+    Profile(String), // Confirm deletion of a profile
+}
+
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub enum AppTab {
+    Explorer,
+    Profiles,
 }
 
 pub struct ModUpdaterApp {
-    pub mods: IndexMap<String, UiModInfo>,
+    // --- Shared State ---
     pub mc_versions: Vec<String>,
     pub selected_mc_version: String,
+    pub status_msg: String,
+    pub current_tab: AppTab,
+
+    // --- Explorer State ---
+    pub mods: IndexMap<String, UiModInfo>,
     tx_jobs: Sender<DownloadJob>,
     rx_events: Receiver<DownloadEvent>,
+    
+    // --- Async Read State ---
+    tx_read_jobs: Sender<ReadJob>,
+    rx_read_events: Receiver<ReadEvent>,
+
     deletion_confirmation: DeletionConfirmation,
-    pub change_mode: ChangeMode,
-    pub status_msg: String,
+
+    // --- Profiles State ---
+    pub profiles_db: ProfilesDatabase,
+    pub memory: TroubleshootMemory,
+    pub selected_profile_name: Option<String>,
+    pub new_profile_name: String,
+
+    // --- UI Selection State ---
+    pub loaders: Vec<String>,
+    pub selected_loader: String,
+    pub selected_modpack_ui: Option<String>,
+    
+    // --- Download Dialog State ---
+    pub download_confirmation_name: Option<String>,
 }
 
 impl ModUpdaterApp {
@@ -71,6 +99,7 @@ impl ModUpdaterApp {
             .to_string()
         );
         let selected_mc_version = mc_versions.get(0).cloned().unwrap_or_else(|| "1.20.2".to_string());
+        
         // Merge with cache (if present) so we keep confirmed IDs / remote version info
         let cache = crate::manage_mods::load_cache();
         let mut ui_mods: IndexMap<String, UiModInfo> = IndexMap::new();
@@ -92,10 +121,12 @@ impl ModUpdaterApp {
         // Compute worker count based on system and number of mods
         let mods_count = ui_mods.len();
         let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-        // Downloads are IO-bound: allow several threads per CPU but cap to avoid excess
-        let mut workers = std::cmp::min(mods_count.max(1), cpus.saturating_mul(4));
-        if workers == 0 { workers = 1; }
-        if workers > 32 { workers = 32; }
+        
+        // Dynamic worker calculation:
+        // - Small mod counts: 1 worker per mod (min(mods, max_workers))
+        // - Large mod counts: Up to 8 workers per cpu, capped at 64
+        let max_workers = (cpus * 8).clamp(4, 64);
+        let workers = std::cmp::min(mods_count, max_workers).max(1);
 
         spawn_workers(workers, rx_jobs, tx_events);
 
@@ -104,270 +135,517 @@ impl ModUpdaterApp {
         for (k, v) in &ui_mods { map_for_save.insert(k.clone(), v.inner.clone()); }
         crate::manage_mods::save_cache(&map_for_save);
 
-        return Self { mods: ui_mods, mc_versions, selected_mc_version, tx_jobs, rx_events, deletion_confirmation: DeletionConfirmation::None, change_mode: ChangeMode::Symlink, status_msg: String::new() };
+        // Create async read channels
+        let (tx_read_jobs, rx_read_jobs) = unbounded();
+        let (tx_read_events, rx_read_events) = unbounded();
+        // Spawn read workers
+        spawn_read_workers(workers, rx_read_jobs, tx_read_events.clone());
+
+        // Load Profiles and Memory
+        let profiles_db = load_profiles();
+        let memory = load_memory();
+
+        return Self { 
+            mods: ui_mods, 
+            mc_versions, 
+            selected_mc_version, 
+            tx_jobs, 
+            rx_events,
+            tx_read_jobs,
+            rx_read_events, 
+            deletion_confirmation: DeletionConfirmation::None, 
+
+            status_msg: String::new(),
+            current_tab: AppTab::Explorer,
+            profiles_db,
+            memory,
+            selected_profile_name: None,
+            new_profile_name: String::new(),
+            loaders: vec!["Fabric".to_string(), "Forge".to_string(), "NeoForge".to_string(),"Quilt".to_string()],
+            selected_loader: "Fabric".to_string(),
+            selected_modpack_ui: None,
+            download_confirmation_name: None,
+        };
+    }
+
+    fn render_explorer_side(&mut self, ctx: &egui::Context) {
+        SidePanel::right("selector_modpacks")
+        .resizable(false)
+        .default_width(200.0)
+        .show(ctx, |ui| {  
+            ui.add_space(6.0);  
+            ui.heading("MODPACKS");
+            ui.add_space(6.0);
+            let modpacks = list_modpacks();
+
+            if modpacks.is_empty() {
+                ui.label("No hay modpacks disponibles");
+            } else {
+                ScrollArea::vertical().show(ui, |ui| {
+                    for mp in modpacks {
+                        // Determine selection state
+                        let is_selected_ui = self.selected_modpack_ui.as_ref() == Some(&mp);
+                        
+                        // Check if active on disk
+                        let is_active_disk = match PATHS.mods_folder.read_link() {
+                            Ok(link) => link.ends_with(&mp),
+                            Err(_) => match read_active_marker() {
+                                Some(active) => active == mp,
+                                None => false,
+                            },
+                        };
+
+                        let label_text = if is_active_disk {
+                            format!("{} (Activo)", mp)
+                        } else {
+                            mp.clone()
+                        };
+
+                        ui.horizontal(|ui| {
+                            // Layout: Botones de acción a la derecha, botón principal llena el resto
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button("🗑").on_hover_text("Eliminar modpack").clicked() {
+                                    self.deletion_confirmation = DeletionConfirmation::Modpack(mp.clone());
+                                }
+
+                                // Si está seleccionado en la UI y no es el activo en disco, mostrar rayo
+                                if is_selected_ui && !is_active_disk {
+                                    if ui.button("⚡").on_hover_text("Activar este modpack").clicked() {
+                                        self.status_msg = match change_mods(&mp) {
+                                            Ok(msg) => msg,
+                                            Err(e) => format!("Error: {}", e),
+                                        };
+                                    }
+                                }
+                                
+                                // Rellenar resto con nombre
+                                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                    if ui.add_sized(ui.available_size(), egui::Button::new(label_text).selected(is_selected_ui)).clicked() {
+                                        let target_folder = if is_selected_ui {
+                                            // Deseleccionar -> Cargar instalados
+                                            self.selected_modpack_ui = None;
+                                            PATHS.mods_folder.clone()
+                                        } else {
+                                            // Seleccionar -> Cargar preview
+                                            self.selected_modpack_ui = Some(mp.clone());
+                                            PATHS.modpacks_folder.join(&mp)
+                                        };
+
+                                        // Async Load Logic
+                                        self.mods.clear();
+                                        if let Ok(entries) = std::fs::read_dir(&target_folder) {
+                                            let mut entries_vec: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+                                            entries_vec.sort_by_key(|e| e.file_name());
+
+                                            for entry in entries_vec {
+                                                let path = entry.path();
+                                                if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("jar") {
+                                                    let key = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                                                    // Placeholder
+                                                    let placeholder = ModInfo {
+                                                        key: key.clone(),
+                                                        name: key.clone(),
+                                                        detected_project_id: None, confirmed_project_id: None,
+                                                        version_local: None, version_remote: None, selected: true,
+                                                        file_size_bytes: None, file_mtime_secs: None,
+                                                    };
+                                                    self.mods.insert(key.clone(), UiModInfo {
+                                                        inner: placeholder,
+                                                        status: ModStatus::Resolving,
+                                                        progress: 0.0,
+                                                    });
+                                                    let _ = self.tx_read_jobs.send(ReadJob { file_path: path });
+                                                }
+                                            }
+                                        }
+                                    }
+                                });
+                            });
+                        });
+                    }
+                });
+            }
+        });
+    }
+
+    fn render_explorer_center(&mut self, ui: &mut egui::Ui) {
+        // Central Panel Content for Explorer
+        let title = if let Some(mp) = &self.selected_modpack_ui {
+             format!("Mods en: {}", mp)
+        } else {
+             "Mods Instalados (Activos)".to_string()
+        };
+        ui.heading(title);
+        
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            if ui.button(" 🔁 ")
+                .on_hover_text("Actualiza la lista.")
+                .clicked() {
+                    let folder = if let Some(mp) = &self.selected_modpack_ui {
+                        let p = PATHS.modpacks_folder.join(mp);
+                        // Asegurar que existe, por si acaso
+                        if !p.exists() {
+                            match std::fs::create_dir_all(&p) {
+                                Ok(_) => p,
+                                Err(_) => PATHS.mods_folder.clone(),
+                            }
+                        } else {
+                            p
+                        }
+                    } else {
+                        PATHS.mods_folder.clone()
+                    };
+                    
+                    // Async Load Logic
+                    self.mods.clear();
+                    if let Ok(entries) = std::fs::read_dir(&folder) {
+                        let mut entries_vec: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+                        entries_vec.sort_by_key(|e| e.file_name());
+
+                        for entry in entries_vec {
+                            let path = entry.path();
+                            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("jar") {
+                                let key = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                                // Placeholder
+                                let placeholder = ModInfo {
+                                    key: key.clone(),
+                                    name: key.clone(),
+                                    detected_project_id: None, confirmed_project_id: None,
+                                    version_local: None, version_remote: None, selected: true,
+                                    file_size_bytes: None, file_mtime_secs: None,
+                                };
+                                self.mods.insert(key.clone(), UiModInfo {
+                                    inner: placeholder,
+                                    status: ModStatus::Resolving,
+                                    progress: 0.0,
+                                });
+                                let _ = self.tx_read_jobs.send(ReadJob { file_path: path });
+                            }
+                        }
+                    }
+                    self.status_msg = "Actualizando lista de mods...".to_string();
+            }
+
+            if ui.button(" ⬇ ")
+                .on_hover_text("Actualizar mods")
+                .clicked() {
+                    // Open confirmation modal with default name
+                    self.download_confirmation_name = Some(format!("mods{}", self.selected_mc_version));
+            }
+             
+            if ui.button(" 🗑 ").clicked() {
+                self.deletion_confirmation = DeletionConfirmation::SelectedMods;
+            }
+
+            let all_selected = self.mods.values().all(|m| m.selected);
+            if ui.button(if all_selected { "✅ Todo" } else { "⬜ Todo" }).clicked() {
+                if all_selected {
+                    for m in self.mods.values_mut() { m.selected = false; }                       
+                } else {
+                    for m in self.mods.values_mut() { m.selected = true; }
+                }
+            }
+
+            if ui.button(" 💾 ")
+            .on_hover_text("Crea un perfil con los mods seleccionados.")
+            .clicked() {
+                let mods_map: IndexMap<String, ModInfo> = self.mods.iter().map(|(k, v)| (k.clone(), v.inner.clone())).collect();
+                let name = format!("Perfil Autogenerado {}", self.selected_mc_version);
+                let mut profile = Profile::new(name.clone(), Some("Importado desde carpeta".to_string()));
+                profile.mods = mods_map;
+                self.profiles_db.add_profile(profile);
+                save_profiles(&self.profiles_db);
+                self.status_msg = format!("Perfil '{}' creado.", name);
+            }
+        });
+        ui.add_space(8.0);
+        ScrollArea::vertical().show(ui, |ui| {
+            let keys: Vec<String> = self.mods.keys().cloned().collect();
+            for key in keys {
+                if let Some(m) = self.mods.get_mut(&key) {
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut m.selected, "");
+                        ui.label(&m.name);
+                        // Check memory for known issues
+                        if let Some(issue) = self.memory.check(&m.name) {
+                            ui.label("⚠️").on_hover_text(format!("Problema conocido: {}\nSolución: {:?}", issue.issue_description, issue.fix));
+                        }
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            match &m.status {
+                                ModStatus::Idle => {},
+                                ModStatus::Resolving => { ui.label("⌛"); },
+                                ModStatus::Downloading(p) => { ui.label(format!("📥 {:.0}%", p * 100.0)); },
+                                ModStatus::Done => { ui.label("✅"); },
+                                ModStatus::Error(msg) => { ui.label(format!("❌ {}", msg)); },
+                            }
+                        });
+                    });
+                }
+            }
+        });
+    }
+
+    fn render_profiles_side(&mut self, ctx: &egui::Context) {
+        SidePanel::left("profiles_list")
+            .resizable(false)
+            .default_width(200.0)
+            .show(ctx, |ui| {
+                ui.heading("Perfiles");
+                ui.add_space(5.0);
+                
+                ui.horizontal(|ui| {
+                    ui.text_edit_singleline(&mut self.new_profile_name).on_hover_text("Nombre nuevo perfil");
+                    if ui.button("➕").clicked() {
+                        if !self.new_profile_name.trim().is_empty() {
+                            let p = Profile::new(self.new_profile_name.clone(), None);
+                            self.profiles_db.add_profile(p);
+                            save_profiles(&self.profiles_db);
+                            self.new_profile_name.clear();
+                        }
+                    }
+                });
+                
+                ui.separator();
+
+                ScrollArea::vertical().show(ui, |ui| {
+                    let names: Vec<String> = self.profiles_db.profiles.keys().cloned().collect();
+                    for name in names {
+                        ui.horizontal(|ui| {
+                            let is_selected = self.selected_profile_name.as_ref() == Some(&name);
+                            if ui.selectable_label(is_selected, &name).clicked() {
+                                self.selected_profile_name = Some(name.clone());
+                            }
+                            if ui.button("🗑").clicked() {
+                                self.deletion_confirmation = DeletionConfirmation::Profile(name.clone());
+                            }
+                        });
+                    }
+                });
+            });
+    }
+
+    fn render_profiles_center(&mut self, ui: &mut egui::Ui) {
+        // Main Profile Editor
+        if let Some(name) = &self.selected_profile_name.clone() {
+            let mut should_save = false; 
+            if let Some(profile) = self.profiles_db.get_profile_mut(name) {
+                ui.heading(format!("Editando: {}", profile.name));
+                ui.label(format!("Creado: {}", profile.created_at)); // TODO: Format timestamp
+                
+                ui.horizontal(|ui| {
+                    if ui.button("💾 Guardar Cambios").clicked() {
+                        should_save = true;
+                        self.status_msg = "Perfil guardado.".to_string();
+                    }
+                    if ui.button("🚀 Instalar/Descargar").on_hover_text("Descarga los mods de este perfil").clicked() {
+                        // Logic to queue downloads based on profile mods
+                        for (k, m) in &profile.mods {
+                            let output_folder_path = if let Some(mp) = &self.selected_modpack_ui {
+                                PATHS.modpacks_folder.join(mp)
+                            } else {
+                                crate::manage_mods::prepare_output_folder(&self.selected_mc_version);
+                                PATHS.modpacks_folder.join(format!(r"mods{}", self.selected_mc_version))
+                            };
+                            let _ = std::fs::create_dir_all(&output_folder_path);
+
+                            let job = DownloadJob {
+                                key: k.clone(),
+                                modinfo: m.clone(),
+                                output_folder: output_folder_path.to_string_lossy().to_string(),
+                                selected_version: self.selected_mc_version.clone(),
+                                selected_loader: self.selected_loader.clone(),
+                            };
+                            let _ = self.tx_jobs.send(job);
+                        }
+                        self.status_msg = format!("Iniciando descarga para perfil {}", profile.name);
+                        self.current_tab = AppTab::Explorer; // Switch to see progress
+                    }
+                });
+                
+                ui.separator();
+                ui.label(format!("Mods: {}", profile.mods.len()));
+                
+                ScrollArea::vertical().id_salt("profile_mods_scroll").show(ui, |ui| {
+                    let mut keys_to_remove = Vec::new();
+                    for (k, m) in &profile.mods {
+                        ui.horizontal(|ui| {
+                            ui.label(&m.name);
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button("❌").clicked() {
+                                    keys_to_remove.push(k.clone());
+                                }
+                            });
+                        });
+                    }
+                    
+                    for k in keys_to_remove {
+                        profile.mods.shift_remove(&k);
+                    }
+                });
+            } else {
+                ui.label("Perfil no encontrado (¿borrado?)");
+            }
+
+            if should_save {
+                save_profiles(&self.profiles_db);
+            }
+        } else {
+            ui.label("Selecciona un perfil de la izquierda o crea uno nuevo.");
+        }
     }
 }
 
 impl eframe::App for ModUpdaterApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Panel lateral derecho: Selector de modpacks
-        let is_confirming_deletion = self.deletion_confirmation != DeletionConfirmation::None;
-        SidePanel::right("selector_modpacks")
-            .resizable(false)
-            .default_width(180.0)
-            .show(ctx, |ui| {
-                ui.heading("Modpacks");
-                ui.add_space(5.0);
-
-                // Selector de modo de cambio (tooltip explica las opciones)
-                ui.horizontal(|ui| {
-                    ui.label("MODO:").on_hover_text("Enlace: intenta crear un acceso directo del modpack que sustituya la carpeta de \"mods\" (rapido). Si no funciona se usa el modo \"copiar\".
-                        \nCopiar: copia y pega los modpacks completos en la carpeta \"mods\" (mas lento pero funciona siempre).");
-
-                    egui::ComboBox::from_id_salt("change-mode")
-                        .selected_text(match self.change_mode {
-                            ChangeMode::Symlink => "Enlace",
-                            ChangeMode::Copy => "Copiar",
-                        })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.change_mode, ChangeMode::Symlink, "Enlace");
-                            ui.selectable_value(&mut self.change_mode, ChangeMode::Copy, "Copiar");
-                        });
-                });
-
-                ui.add_space(6.0);
-
-                let modpacks = list_modpacks();
-
-                if modpacks.is_empty() {
-                    ui.label("No hay modpacks disponibles");
-                } else {
-                    ScrollArea::vertical().show(ui, |ui| {
-                        for mp in modpacks {
-                            ui.horizontal(|ui| {
-                                let seleccionado = match PATHS.mods_folder.read_link() {
-                                    Ok(link) => link.ends_with(&mp),
-                                    Err(_) => match read_active_marker() {
-                                        Some(active) => active == mp,
-                                        None => false,
-                                    },
-                                };
-                                if seleccionado {
-                                    ui.label(format!("{} ✅", mp));
-                                } else {
-                                    ui.label(&mp);
-                                    if ui.button("Cambiar").clicked() {
-                                        self.status_msg = match self.change_mode {
-                                            ChangeMode::Symlink => change_mods(&mp).unwrap(),
-                                            ChangeMode::Copy => {
-                                                let target = &PATHS.mods_folder;
-                                                let source = &PATHS.modpacks_folder.join(&mp);
-                                                match copy_modpack_all(source, target) {
-                                                    Ok(()) => format!("Mods cambiados a '{}'.", &mp),
-                                                    Err(e) => format!("Error al copiar modpack: {}", e),
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // Button to delete this modpack
-                                ui.add_space(4.0);
-                                if ui.button("🗑").clicked() {
-                                    self.deletion_confirmation = DeletionConfirmation::Modpack(mp.clone());
-                                }
-                            });
-                            ui.separator();
-                        }
-                    });
-                }
-                // Mostrar mensaje de estado
-                if !self.status_msg.is_empty() {
-                    ui.separator();
-                    ui.label(&self.status_msg);
-                }     
-            });
-        ctx.request_repaint(); // Para que la UI se actualice mientras se descarga
-
-        CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Mods instalados");
-            ui.add_space(2.0);
+        // --- Top Bar (Tabs) ---
+        TopBottomPanel::top("top_tabs").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.label("Versión:").on_hover_text("Versión a la que se va a actualizar");
-                egui::ComboBox::from_id_salt("mc-version-box")
-                    .selected_text(&self.selected_mc_version)
-                    .show_ui(ui, |ui| {
-                        for v in &self.mc_versions {
-                            ui.selectable_value(&mut self.selected_mc_version, v.clone(), v);
-                        }
-                        ui.separator();
-                        ui.label("Personalizada:");
-                        ui.text_edit_singleline(&mut self.selected_mc_version);
-                    });
-        
-                
-                if ui.button("🔁")
-                    .on_hover_text("Actualiza la lista de mods leyendo la carpeta actual.")
-                    .clicked() {
-                        let detected = read_mods_in_folder(&PATHS.mods_folder.to_string_lossy().to_string());
-                        let ui_mods: IndexMap<String, UiModInfo> = detected.into_iter().map(|(k, v)| (k, UiModInfo::from(v))).collect();
-                        self.mods = ui_mods; 
-                        self.status_msg = "Lista de mods actualizada".to_string();
+                if ui.selectable_label(self.current_tab == AppTab::Explorer, "📂 Explorador & Descargas").clicked() {
+                    self.current_tab = AppTab::Explorer;
                 }
-
-                
-                if ui.button("⬇")
-                    .on_hover_text("Descarga los mods seleccionados en la versión escogida.")
-                    .clicked() {
-                        // Encolar trabajos para los mods seleccionados
-                        for (k, m) in self.mods.clone().into_iter() {
-                            if m.selected {
-                                crate::manage_mods::prepare_output_folder(&self.selected_mc_version);
-                                let output_folder_path = PATHS.modpacks_folder.join(format!(r"mods{}", self.selected_mc_version));
-                                let job = DownloadJob {
-                                    key: k.clone(),
-                                    modinfo: m.inner.clone(),
-                                    output_folder: output_folder_path.to_string_lossy().to_string(),
-                                    selected_version: self.selected_mc_version.clone()
-                                };
-                                let _ = self.tx_jobs.send(job);
-                            }
-                        }
-                }
-                // Button to delete selected mods
-                if ui.button("🗑")
-                    .on_hover_text("Elimina los archivos .jar de los mods seleccionados")
-                    .clicked() {
-                    self.deletion_confirmation = DeletionConfirmation::SelectedMods;
-                }
-
-                let all_selected = self.mods.values().all(|m| m.selected);
-                let select_label = if all_selected { "✅" } else { "⬜" };
-                if ui.button(select_label)
-                    .on_hover_text("Alterna la selección de todos los mods")
-                    .clicked() {
-                    if all_selected {
-                        for m in self.mods.values_mut() { m.selected = false; }                       
-                    } else {
-                        for m in self.mods.values_mut() { m.selected = true; }
-                    }
+                if ui.selectable_label(self.current_tab == AppTab::Profiles, "👥 Perfiles").clicked() {
+                    self.current_tab = AppTab::Profiles;
                 }
             });
+        });
 
-            ui.add_space(8.0);
-            ScrollArea::vertical().show(ui, |ui| {
-                let keys: Vec<String> = self.mods.keys().cloned().collect();
-                for key in keys {
-                    if let Some(m) = self.mods.get_mut(&key) {
-                        ui.horizontal(|ui| {
-                            ui.checkbox(&mut m.selected, "");
-                            ui.label(&m.name);
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.add_space(8.0); // Margen derecho para el scrollbar
-                                match &m.status {
-                                    ModStatus::Idle => {},
-                                    ModStatus::Resolving => { ui.label("⌛ Resolviendo..."); },
-                                    ModStatus::Downloading(progress) => { ui.label(format!("📥 {}%", (progress * 100.0) as i32)); },
-                                    ModStatus::Done => { ui.label("✅ Completado"); },
-                                    ModStatus::Error(msg) => { ui.label(format!("❌ Error: {}", msg)); },
-                                }
-                            });
-                        });
-                    }
-                }
+        // --- Status Bar ---
+        TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(&self.status_msg);
             });
-            ui.separator();
+        });
 
-            // Procesar eventos entrantes desde los workers
-            for ev in self.rx_events.try_iter() {
-                match ev {
-                    DownloadEvent::Resolving { key } => {
-                        if let Some(m) = self.mods.get_mut(&key) { m.status = ModStatus::Resolving; }
-                    }
-                    DownloadEvent::Resolved { key } => {
-                        if let Some(m) = self.mods.get_mut(&key) { m.status = ModStatus::Idle; }
-                    }
-                    DownloadEvent::Started { key } => {
-                        if let Some(m) = self.mods.get_mut(&key) { m.status = ModStatus::Downloading(0.0); }
-                    }
-                    DownloadEvent::ResolvedInfo { key, confirmed_project_id, version_remote } => {
-                        if let Some(m) = self.mods.get_mut(&key) {
-                            m.inner.confirmed_project_id = confirmed_project_id.clone();
-                            m.inner.version_remote = version_remote.clone();
+        // --- Side Panels (Must be called before CentralPanel) ---
+        match self.current_tab {
+            AppTab::Explorer => self.render_explorer_side(ctx),
+            AppTab::Profiles => self.render_profiles_side(ctx),
+        }
 
-                            // Save updated cache to disk (UI thread owns cache writes)
-                            let mut map_for_save: IndexMap<String, crate::manage_mods::ModInfo> = IndexMap::new();
-                            for (k, v) in &self.mods { map_for_save.insert(k.clone(), v.inner.clone()); }
-                            crate::manage_mods::save_cache(&map_for_save);
-                        }
-                    }
-                    DownloadEvent::Done { key } => {
-                        if let Some(m) = self.mods.get_mut(&key) { m.status = ModStatus::Done; m.progress = 1.0; }
-                    }
-                    DownloadEvent::Error { key, msg } => {
-                        if let Some(m) = self.mods.get_mut(&key) { m.status = ModStatus::Error(msg); }
-                    }
-                }
+        // --- Main Content ---
+        CentralPanel::default().show(ctx, |ui| {
+            match self.current_tab {
+                AppTab::Explorer => self.render_explorer_center(ui),
+                AppTab::Profiles => self.render_profiles_center(ui),
             }
         });
 
-        // --- Ventana de confirmación de borrado ---
-        if is_confirming_deletion {
-            egui::Window::new("Confirmar borrado")
+        // --- Background Events (Downloads & Reads) ---
+        for ev in self.rx_events.try_iter() {
+            match ev {
+                // ... (Download events handling) ...
+                DownloadEvent::Resolving { key } => {
+                    if let Some(m) = self.mods.get_mut(&key) { m.status = ModStatus::Resolving; }
+                }
+                DownloadEvent::Resolved { key } => {
+                    if let Some(m) = self.mods.get_mut(&key) { m.status = ModStatus::Idle; }
+                }
+                DownloadEvent::Started { key } => {
+                    if let Some(m) = self.mods.get_mut(&key) { m.status = ModStatus::Downloading(0.0); }
+                }
+                DownloadEvent::ResolvedInfo { key, confirmed_project_id, version_remote } => {
+                    if let Some(m) = self.mods.get_mut(&key) {
+                        m.inner.confirmed_project_id = confirmed_project_id.clone();
+                        m.inner.version_remote = version_remote.clone();
+                        // Save cache
+                        let mut map_for_save: IndexMap<String, crate::manage_mods::ModInfo> = IndexMap::new();
+                        for (k, v) in &self.mods { map_for_save.insert(k.clone(), v.inner.clone()); }
+                        crate::manage_mods::save_cache(&map_for_save);
+                    }
+                }
+                DownloadEvent::Done { key } => {
+                    if let Some(m) = self.mods.get_mut(&key) { m.status = ModStatus::Done; m.progress = 1.0; }
+                }
+                DownloadEvent::Error { key, msg } => {
+                     // Log error to status if urgent, otherwise just mark mod
+                     if let Some(m) = self.mods.get_mut(&key) { m.status = ModStatus::Error(msg); }
+                }
+            }
+        }
+        
+        for ev in self.rx_read_events.try_iter() {
+            match ev {
+                ReadEvent::Done { info } => {
+                    // Update entry. The key should match what we created (filename).
+                    // Or if we used mod name as key, we might need to map it. 
+                    // But we decided key = filename for now in placeholders.
+                    let key = info.key.clone();
+                    // We might need to replace the placeholder
+                    if let Some(placeholder) = self.mods.get_mut(&key) {
+                        placeholder.inner = info;
+                        placeholder.status = ModStatus::Idle;
+                    }
+                }
+                ReadEvent::Error { path, msg } => {
+                     println!("Error reading {:?}: {}", path, msg);
+                     // Optionally update status
+                     let key = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                     if let Some(m) = self.mods.get_mut(&key) {
+                         m.status = ModStatus::Error("Failed to read".to_string());
+                     }
+                }
+            }
+        }
+
+        // --- Global Deletion Modal ---
+        if self.deletion_confirmation != DeletionConfirmation::None {
+            egui::Window::new("Confirmar Acción")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .show(ctx, |ui| {
-                    let message = match &self.deletion_confirmation {
-                        DeletionConfirmation::Modpack(name) => format!("¿Seguro que quieres borrar el modpack '{}'?", name),
-                        DeletionConfirmation::SelectedMods => "¿Seguro que quieres borrar los mods seleccionados?".to_string(),
-                        DeletionConfirmation::None => "".to_string(),
+                    match &self.deletion_confirmation {
+                        DeletionConfirmation::Modpack(name) => ui.label(format!("¿Borrar modpack '{}' de disco?", name)),
+                        DeletionConfirmation::SelectedMods => ui.label("¿Borrar mods seleccionados de disco?"),
+                        DeletionConfirmation::Profile(name) => ui.label(format!("¿Borrar perfil lógico '{}'? (No borra archivos)", name)),
+                        DeletionConfirmation::None => ui.label(""),
                     };
-                    ui.label(message);
+                    
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
                         if ui.button("Cancelar").clicked() {
                             self.deletion_confirmation = DeletionConfirmation::None;
                         }
-                        ui.add_space(10.0);
-                        if ui.button("Aceptar").clicked() {
+                        if ui.button("Confirmar").clicked() {
                             match self.deletion_confirmation.clone() {
-                                DeletionConfirmation::Modpack(mp_name) => {
-                                    let target = PATHS.modpacks_folder.join(&mp_name);
-                                    match std::fs::remove_dir_all(&target) {
-                                        Ok(_) => { self.status_msg = format!("Modpack '{}' borrado.", mp_name); }
-                                        Err(e) => { self.status_msg = format!("Error borrando modpack '{}': {}", mp_name, e); }
+                                DeletionConfirmation::Modpack(name) => {
+                                    let target = PATHS.modpacks_folder.join(&name);
+                                    if std::fs::remove_dir_all(&target).is_ok() {
+                                        self.status_msg = format!("Modpack '{}' eliminado.", name);
                                     }
                                 }
                                 DeletionConfirmation::SelectedMods => {
-                                    let mut removed_keys: Vec<String> = Vec::new();
-                                    // Usamos retain_mut para iterar y modificar en el mismo lugar
-                                    self.mods.retain(|key, m| {
-                                        if m.selected {
-                                            // Usamos la ruta canónica para asegurar que borramos el archivo real
-                                            // incluso si `mods` es un enlace simbólico.
-                                            let path = match PATHS.mods_folder.canonicalize() {
-                                                Ok(p) => p.join(key),
-                                                Err(_) => PATHS.mods_folder.join(key), // Fallback a la ruta normal
-                                            };
+                                     let target_folder = if let Some(mp) = &self.selected_modpack_ui {
+                                         PATHS.modpacks_folder.join(mp)
+                                     } else {
+                                         PATHS.mods_folder.clone()
+                                     };
+                                     
+                                     let mut removed_cnt = 0;
+                                     // Clonamos para evitar problemas de borrow checker al iterar y modificar
+                                     let keys_to_remove: Vec<String> = self.mods.iter()
+                                         .filter(|(_, m)| m.selected)
+                                         .map(|(k, _)| k.clone())
+                                         .collect();
 
-                                            match std::fs::remove_file(&path) {
-                                                Ok(_) => {
-                                                    removed_keys.push(key.clone());
-                                                    false // Eliminar de self.mods
-                                                },
-                                                Err(e) => {
-                                                    self.status_msg = format!("Error borrando {}: {}", key, e);
-                                                    true // Mantener en self.mods si hay error
-                                                }
-                                            }
-                                        } else {
-                                            true // Mantener si no está seleccionado
-                                        }
-                                    });
-                                    if !removed_keys.is_empty() {
-                                        self.status_msg = format!("Borrados {} mods seleccionados.", removed_keys.len());
+                                     for key in keys_to_remove {
+                                         let path = target_folder.join(&key);
+                                         if std::fs::remove_file(&path).is_ok() {
+                                             self.mods.shift_remove(&key);
+                                             removed_cnt += 1;
+                                         }
+                                     }
+                                     self.status_msg = format!("{} mods eliminados.", removed_cnt);
+                                }
+                                DeletionConfirmation::Profile(name) => {
+                                    self.profiles_db.delete_profile(&name);
+                                    save_profiles(&self.profiles_db);
+                                    if self.selected_profile_name.as_ref() == Some(&name) {
+                                        self.selected_profile_name = None;
                                     }
+                                    self.status_msg = format!("Perfil '{}' eliminado.", name);
                                 }
                                 _ => {}
                             }
@@ -375,6 +653,92 @@ impl eframe::App for ModUpdaterApp {
                         }
                     });
                 });
+        }
+
+        // --- Download Confirmation Modal ---
+        if let Some(name_rc) = &self.download_confirmation_name.clone() {
+            let mut name = name_rc.clone();
+            let mut open = true;
+            let mut close_requested = false;
+
+            egui::Window::new("Confirmar Descarga")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    ui.label("Nombre de la carpeta del Modpack:");
+                    ui.text_edit_singleline(&mut name);
+                    
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.add_space(5.0);
+                    
+                    // 1. Selector de Loader
+                    ui.horizontal(|ui| {
+                        ui.label("Loader:");
+                        egui::ComboBox::from_id_salt("loader-selector-modal")
+                            .selected_text(&self.selected_loader)
+                            .show_ui(ui, |ui| {
+                                for loader in &self.loaders {
+                                    ui.selectable_value(&mut self.selected_loader, loader.clone(), loader);
+                                }
+                            });
+
+                        // 2. Selector de Versión MC
+                        ui.label("Versión:");
+                        egui::ComboBox::from_id_salt("mc-version-box-modal")
+                            .selected_text(&self.selected_mc_version)
+                            .show_ui(ui, |ui| {
+                                for v in &self.mc_versions {
+                                    ui.selectable_value(&mut self.selected_mc_version, v.clone(), v);
+                                }
+                            ui.separator();
+                            ui.text_edit_singleline(&mut self.selected_mc_version);
+                        });
+                    });
+
+                    ui.add_space(10.0);
+
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancelar").clicked() {
+                            close_requested = true;
+                        }
+                        if ui.button("Confirmar").clicked() {
+                             if !name.trim().is_empty() {
+                                 // Logic to start download
+                                 let output_folder_path = PATHS.modpacks_folder.join(&name);
+                                 // Create dir
+                                 let _ = std::fs::create_dir_all(&output_folder_path);
+         
+                                 let mut count = 0;
+                                 for (k, m) in self.mods.clone().into_iter() {
+                                     if m.selected {
+                                         let job = DownloadJob {
+                                             key: k.clone(),
+                                             modinfo: m.inner.clone(),
+                                             output_folder: output_folder_path.to_string_lossy().to_string(),
+                                             selected_version: self.selected_mc_version.clone(),
+                                             selected_loader: self.selected_loader.clone(),
+                                         };
+                                         let _ = self.tx_jobs.send(job);
+                                         count += 1;
+                                     }
+                                 }
+                                 self.status_msg = format!("Iniciando descarga de {} mods en '{}'", count, name);
+                                 close_requested = true;
+                             }
+                        }
+                    });
+                });
+            
+            // If window closed via X button or logic request
+            if !open || close_requested {
+                self.download_confirmation_name = None;
+            } else {
+                // write back changes to text field
+                self.download_confirmation_name = Some(name);
+            }
         }
     }
 }

@@ -18,12 +18,12 @@ pub struct ModDownloadInfo {
 }
 
 /// Intenta encontrar un mod, primero en Modrinth, y si falla, en CurseForge.
-pub fn find_mod_download(mod_name: &str, mod_id: Option<&str>, game_version: &str, curseforge_api_key: &str) -> Option<ModDownloadInfo> {
-    println!("🔍 Procesando '{}' (ID: {:?}) v{}...", mod_name, mod_id.unwrap_or("N/A"), game_version);
+pub fn find_mod_download(mod_name: &str, mod_id: Option<&str>, game_version: &str, loader: &str, curseforge_api_key: &str) -> Option<ModDownloadInfo> {
+    println!("🔍 Procesando '{}' (ID: {:?}) v{} [{}]...", mod_name, mod_id.unwrap_or("N/A"), game_version, loader);
     
     // Helper para verificar y descargar
     let try_find_version = |hit: &ModrinthSearchHit| -> Option<ModDownloadInfo> {
-        if let Some(modrinth_version) = fetch_modrinth_version(&hit.project_id, game_version) {
+        if let Some(modrinth_version) = fetch_modrinth_version(&hit.project_id, game_version, loader) {
             if let Some(file) = modrinth_version.first_file() {
                 println!("✅ Encontrado en Modrinth: {} (Project: {})", file.filename, hit.title);
                 // Convertimos del tipo `ModFile` a nuestro tipo unificado
@@ -65,7 +65,7 @@ pub fn find_mod_download(mod_name: &str, mod_id: Option<&str>, game_version: &st
 
     // --- 3. Intento con CurseForge (Fallback) ---
     if let Some(curseforge_id) = fetch_curseforge_project_id(mod_name, curseforge_api_key) {
-        if let Some(curse_file) = fetch_curseforge_version_file(curseforge_id, game_version, curseforge_api_key) {
+        if let Some(curse_file) = fetch_curseforge_version_file(curseforge_id, game_version, loader, curseforge_api_key) {
             if let Some(download_url) = curse_file.download_url {
                 println!("✅ Encontrado en CurseForge: {}", curse_file.file_name);
                 return Some(ModDownloadInfo {
@@ -146,7 +146,7 @@ pub fn search_modrinth_project(query: &str) -> Vec<ModrinthSearchHit> {
     return vec![];
 }
 
-pub fn fetch_modrinth_version(mod_id: &str, version: &str) -> Option<ModrinthVersion> {
+pub fn fetch_modrinth_version(mod_id: &str, version: &str, loader: &str) -> Option<ModrinthVersion> {
     let client = build_modrinth_client();
     let api_url = format!("https://api.modrinth.com/v2/project/{}/version", mod_id);
 
@@ -155,7 +155,7 @@ pub fn fetch_modrinth_version(mod_id: &str, version: &str) -> Option<ModrinthVer
             if resp.status().is_success() {
                 let versions: Vec<ModrinthVersion> = resp.json().unwrap_or_default();
                 let matching_version = versions.into_iter().find(|v| {
-                    v.loaders.iter().any(|l| l == "fabric") && 
+                    v.loaders.iter().any(|l| l.eq_ignore_ascii_case(loader)) && 
                     v.game_versions.iter().any(|gv| gv == version)
                 });
                 return matching_version;
@@ -232,13 +232,23 @@ pub fn fetch_curseforge_project_id(mod_name: &str, api_key: &str) -> Option<u32>
     }
 }
 
-pub fn fetch_curseforge_version_file(mod_id: u32, game_version: &str, api_key: &str) -> Option<CurseFile> {
+pub fn fetch_curseforge_version_file(mod_id: u32, game_version: &str, loader: &str, api_key: &str) -> Option<CurseFile> {
     let client = build_curse_client(api_key);
     let api_url = format!("https://api.curseforge.com/v1/mods/{}/files", mod_id);
 
+    // Map loader to CurseForge ID
+    // 1 = Forge, 4 = Fabric, 5 = Quilt, 6 = NeoForge
+    let loader_type = match loader.to_lowercase().as_str() {
+        "forge" => "1",
+        "fabric" => "4",
+        "quilt" => "5",
+        "neoforge" => "6",
+        _ => "4", // Default to Fabric if unknown
+    };
+
     let params = [
         ("gameVersion", game_version),
-        ("modLoaderType", "4")
+        ("modLoaderType", loader_type)
     ];
 
     match client.get(&api_url).query(&params).send() {

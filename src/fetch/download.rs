@@ -23,6 +23,7 @@ pub struct DownloadJob {
     pub modinfo: ModInfo,
     pub output_folder: String,
     pub selected_version: String,
+    pub selected_loader: String,
 }
 
 pub fn spawn_workers(n: usize, rx: Receiver<DownloadJob>, tx_events: Sender<DownloadEvent>) {
@@ -33,7 +34,7 @@ pub fn spawn_workers(n: usize, rx: Receiver<DownloadJob>, tx_events: Sender<Down
         thread::spawn(move || {
             while let Ok(job) = rx.recv() {
                 let key = job.key.clone();
-                let mut mi = job.modinfo.clone();
+                let mi = job.modinfo.clone();
                 // Use the unified fetch API (Modrinth primary, CurseForge fallback)
                 let _ = tx.send(DownloadEvent::Resolving { key: key.clone() });
 
@@ -42,7 +43,7 @@ pub fn spawn_workers(n: usize, rx: Receiver<DownloadJob>, tx_events: Sender<Down
 
                 let mod_id_candidate = mi.confirmed_project_id.as_deref().or(mi.detected_project_id.as_deref());
 
-                match fetch_from_api::find_mod_download(&mi.name, mod_id_candidate, &job.selected_version, &cf_key) {
+                match fetch_from_api::find_mod_download(&mi.name, mod_id_candidate, &job.selected_version, &job.selected_loader, &cf_key) {
                     Some(info) => {
                         // Try to also obtain resolved IDs/versions for caching
                         let mut confirmed_project_id: Option<String> = None;
@@ -59,12 +60,13 @@ pub fn spawn_workers(n: usize, rx: Receiver<DownloadJob>, tx_events: Sender<Down
                         if let Some(hit) = hits.first() {
                              confirmed_project_id = Some(hit.project_id.clone());
                              // Check if version exists to set version_remote
-                             if let Some(_v) = fetch_from_api::fetch_modrinth_version(&hit.project_id, &job.selected_version) {
+                             if let Some(v) = fetch_from_api::fetch_modrinth_version(&hit.project_id, &job.selected_version, &job.selected_loader) {
                                  version_remote = Some(job.selected_version.clone());
+                                 // loaders = v.loaders; // This line was commented out as 'loaders' is not defined in this scope.
                              }
                         } else if let Some(cf_id) = fetch_from_api::fetch_curseforge_project_id(&mi.name, &cf_key) {
                             confirmed_project_id = Some(cf_id.to_string());
-                            if let Some(cfile) = fetch_from_api::fetch_curseforge_version_file(cf_id, &job.selected_version, &cf_key) {
+                            if let Some(cfile) = fetch_from_api::fetch_curseforge_version_file(cf_id, &job.selected_version, &job.selected_loader, &cf_key) {
                                 version_remote = Some(cfile.file_name);
                             }
                         }

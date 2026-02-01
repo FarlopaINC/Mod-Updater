@@ -4,6 +4,7 @@ mod manage_mods;
 mod fetch;
 mod ui;
 mod paths_vars;
+
 use crate::ui::app::ModUpdaterApp;
 use crate::manage_mods::{read_mods_in_folder, save_cache, load_cache};
 use crate::paths_vars::PATHS;

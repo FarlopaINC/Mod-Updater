@@ -14,12 +14,16 @@ pub struct ModInfo {
     pub file_size_bytes: Option<u64>,
     #[serde(default)]
     pub file_mtime_secs: Option<u64>,
+    #[serde(default)]
+    pub depends: Option<std::collections::HashMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct FabricModJson {
     pub id: String,
     pub name: String,
+    pub version: Option<String>,
+    pub depends: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 /// Estructuras para parsear el manifest de versiones de Minecraft

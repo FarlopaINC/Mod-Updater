@@ -21,56 +21,99 @@ pub fn prepare_output_folder(version: &str) {
     } 
 }   
 
+use rayon::prelude::*;
+
 pub fn change_mods(modpack: &str) -> Result<String, String> {
     let target = &PATHS.mods_folder;
     let source = &PATHS.modpacks_folder.join(modpack);
 
-    // Si ya existe un enlace simbólico, intentamos eliminarlo; si no es symlink, continuamos
+    // 1. Limpieza: Si ya existe un enlace simbólico, intentamos eliminarlo
     if let Ok(metadata) = std::fs::symlink_metadata(target) {
         if metadata.file_type().is_symlink() {
-            // intentar eliminar como archivo primero, si falla, intentar como dir
             let _ = std::fs::remove_file(target).or_else(|_| std::fs::remove_dir(target));
+        } else if metadata.is_dir() {
+             // Si es un directorio real, lo borramos entero para asegurar estado limpio
+             let _ = std::fs::remove_dir_all(target);
         }
     }
 
-    // Intentar crear enlace simbólico / junction (rápido)
+    // 2. Intento 1: Symlink / Junction (Rápido, pero puede pedir permisos)
     match symlink(source, target) {
         Ok(_) => {
             let _ = write_active_marker(modpack);
             return Ok(format!("Mods cambiados a '{}' usando enlace/junction.", modpack));
         }
-        Err(e) => {
-            // Fallback: intentar copiar el modpack preservando el origen (no usar rename)
-            match copy_modpack_all(source, target) {
-                Ok(()) => {
-                    let _ = write_active_marker(modpack);
-                    Ok(format!("Mods cambiados a '{}' usando fallback (copia preservando original).", modpack))
-                }
-                Err(e2) => Err(format!("No se pudo cambiar mods: symlink/junction falló ({:?}), fallback (copia) falló ({:?})", e, e2)),
-            }
+        Err(e_sym) => {
+             // 3. Intento 2: Hard Links (Rápido, sin permisos de admin, pero misma partición)
+             match copy_modpack_hardlinks(source, target) {
+                 Ok(_) => {
+                     let _ = write_active_marker(modpack);
+                     return Ok(format!("Mods cambiados a '{}' usando Hard Links (rápido).", modpack));
+                 },
+                 Err(e_hl) => {
+                     // 4. Intento 3: Copia Física Paralela (Fallback robusto)
+                     // Limpiamos lo que haya podido dejar el intento de hardlinks
+                     if target.exists() { let _ = fs::remove_dir_all(target); }
+                     
+                     match copy_modpack_parallel(source, target) {
+                        Ok(_) => {
+                            let _ = write_active_marker(modpack);
+                            Ok(format!("Mods cambiados a '{}' usando Copia Paralela (fallback).", modpack))
+                        },
+                        Err(e_cp) => Err(format!("Fallo total al cambiar mods.\nSymlink: {:?}\nHardLink: {:?}\nCopy: {:?}", e_sym, e_hl, e_cp)),
+                     }
+                 }
+             }
         }
     }
 }
 
-pub fn copy_modpack_all(src: &Path, dst: &Path) -> std::io::Result<()> {
-    if (&PATHS.mods_folder).exists() {
-        fs::remove_dir_all(&PATHS.mods_folder)?;
+// Recoleta operaciones de copia recursivamente
+fn collect_copy_ops(src: &Path, dst: &Path, ops: &mut Vec<(PathBuf, PathBuf)>) -> std::io::Result<()> {
+    if !dst.exists() {
+        fs::create_dir_all(dst)?;
     }
-    fs::create_dir_all(dst)?;
+    
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         let ty = entry.file_type()?;
         let from = entry.path();
         let to = dst.join(entry.file_name());
+        
         if ty.is_dir() {
-            copy_modpack_all(&from, &to)?;
+            collect_copy_ops(&from, &to, ops)?;
         } else if ty.is_file() {
-            fs::copy(&from, &to)?;
-        } else {
-            // Ignorar otros tipos (symlinks, etc.)
+            ops.push((from, to));
         }
     }
     Ok(())
+}
+
+pub fn copy_modpack_hardlinks(src: &Path, dst: &Path) -> std::io::Result<()> {
+    // Para hardlinks, igual necesitamos recorrer y linkear uno a uno.
+    // No podemos usar rayon fácilmente porque create_dir no es thread safe si colisionan, 
+    // pero la creación de links es rápida. Lo haremos secuencial o híbrido.
+    // Haremos secuencial la estructura de directorios y luego los links.
+    
+    // De hecho, podemos reusar la logica de collect para separar dirs y files.
+    let mut files = Vec::new();
+    collect_copy_ops(src, dst, &mut files)?;
+    
+    // Intentar crear hardlinks
+    for (from, to) in files {
+        fs::hard_link(&from, &to)?;
+    }
+    Ok(())
+}
+
+pub fn copy_modpack_parallel(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let mut files = Vec::new();
+    collect_copy_ops(src, dst, &mut files)?;
+    
+    // Usar Rayon para copiar archivos en paralelo
+    files.par_iter().try_for_each(|(from, to)| {
+        fs::copy(from, to).map(|_| ())
+    })
 }
 
 // Marker file helpers

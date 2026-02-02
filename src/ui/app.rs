@@ -91,6 +91,57 @@ pub struct ModUpdaterApp {
     pub download_confirmation_name: Option<String>,
 }
 
+fn format_version_range(v: &str) -> String {
+    if v == "*" { return "*".to_string(); }
+    
+    // Strip operators to isolate versions
+    let s = v.replace(">=", "")
+             .replace("<=", "")
+             .replace(">", "")
+             .replace("<", "");
+
+    // Split by whitespace to process individual version segments
+    let parts: Vec<String> = s.split_whitespace()
+        .map(|part| {
+            let mut p = part.to_string();
+            // User requested removal of trailing hyphens (e.g. "1.21.10-" -> "1.21.10")
+            if p.ends_with('-') { p.pop(); }
+            p
+        })
+        .collect();
+
+    if parts.is_empty() { return v.to_string(); }
+
+    if parts.len() >= 2 {
+        // It's likely a range: "1.21.10" "1.21.11" -> "1.21.10 - 1.21.11"
+        return parts.join(" - ");
+    } else {
+        // Single version constraint
+        let val = &parts[0];
+        if v.contains('>') {
+            return format!("{} +", val);
+        } else if v.contains('<') {
+            return format!("{} -", val);
+        } else {
+            return val.clone();
+        }
+    }
+}
+
+fn format_dep_name(k: &str) -> String {
+    match k {
+        "fabricloader" => "Fabric".to_string(),
+        "fabric-loader" => "Fabric".to_string(),
+        "forge" => "Forge".to_string(),
+        "neoforge" => "NeoForge".to_string(),
+        "quilt_loader" => "Quilt".to_string(),
+        "minecraft" => "Minecraft".to_string(),
+        "java" => "Java".to_string(),
+        "fabric-api" => "Fabric API".to_string(),
+        _ => k.to_string(), // fallback
+    }
+}
+
 impl ModUpdaterApp {
     pub fn new(mods: IndexMap<String, ModInfo>) -> Self {
         let mc_versions = get_minecraft_versions(&PATHS.versions_folder
@@ -248,6 +299,7 @@ impl ModUpdaterApp {
                                                         detected_project_id: None, confirmed_project_id: None,
                                                         version_local: None, version_remote: None, selected: true,
                                                         file_size_bytes: None, file_mtime_secs: None,
+                                                        depends: None,
                                                     };
                                                     self.mods.insert(key.clone(), UiModInfo {
                                                         inner: placeholder,
@@ -307,16 +359,17 @@ impl ModUpdaterApp {
                             let path = entry.path();
                             if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("jar") {
                                 let key = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-                                // Placeholder
-                                let placeholder = ModInfo {
-                                    key: key.clone(),
-                                    name: key.clone(),
-                                    detected_project_id: None, confirmed_project_id: None,
-                                    version_local: None, version_remote: None, selected: true,
-                                    file_size_bytes: None, file_mtime_secs: None,
-                                };
-                                self.mods.insert(key.clone(), UiModInfo {
-                                    inner: placeholder,
+                                    // Placeholder
+                                    let placeholder = ModInfo {
+                                        key: key.clone(),
+                                        name: key.clone(),
+                                        detected_project_id: None, confirmed_project_id: None,
+                                        version_local: None, version_remote: None, selected: true,
+                                        file_size_bytes: None, file_mtime_secs: None,
+                                        depends: None,
+                                    };
+                                    self.mods.insert(key.clone(), UiModInfo {
+                                        inner: placeholder,
                                     status: ModStatus::Resolving,
                                     progress: 0.0,
                                 });
@@ -366,11 +419,63 @@ impl ModUpdaterApp {
                 if let Some(m) = self.mods.get_mut(&key) {
                     ui.horizontal(|ui| {
                         ui.checkbox(&mut m.selected, "");
-                        ui.label(&m.name);
-                        // Check memory for known issues
-                        if let Some(issue) = self.memory.check(&m.name) {
-                            ui.label("⚠️").on_hover_text(format!("Problema conocido: {}\nSolución: {:?}", issue.issue_description, issue.fix));
-                        }
+                        
+                        ui.vertical(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(&m.name).size(16.0).strong());
+                                if let Some(v) = &m.version_local {
+                                    ui.label(egui::RichText::new(format!("v{}", v)).color(ui.visuals().weak_text_color()));
+                                }
+                                
+                                // Check memory for known issues
+                                if let Some(issue) = self.memory.check(&m.name) {
+                                    ui.label("⚠️").on_hover_text(format!("Problema conocido: {}\nSolución: {:?}", issue.issue_description, issue.fix));
+                                }
+                            });
+
+                             if let Some(deps) = &m.depends {
+                                 let mut loaders = Vec::new();
+                                 let mut others = Vec::new();
+                                 
+                                 let loader_keys = ["fabricloader", "fabric-loader", "forge", "neoforge", "quilt_loader"];
+                                 
+                                 for (k, v) in deps {
+                                     let clean_ver = format_version_range(v);
+                                     let clean_name = format_dep_name(k);
+                                     
+                                     if loader_keys.contains(&k.as_str()) {
+                                         loaders.push((clean_name, clean_ver));
+                                     } else if ["minecraft", "fabric-api"].contains(&k.as_str()) {
+                                         others.push((clean_name, clean_ver));
+                                     }
+                                 }
+                                 
+                                 let mut display_items = Vec::new();
+                                 
+                                 // Handle Loaders
+                                 if loaders.len() == 1 {
+                                     let (n, v) = &loaders[0];
+                                     display_items.push(format!("{} {}", n, v));
+                                 } else if loaders.len() > 1 {
+                                     let tooltip = loaders.iter().map(|(n, v)| format!("{} {}", n, v)).collect::<Vec<_>>().join("\n");
+                                     ui.label(egui::RichText::new("Multi-Loader ℹ").size(11.0).color(ui.visuals().weak_text_color()))
+                                        .on_hover_text(tooltip);
+                                 }
+
+                                 // Add others
+                                 for (n, v) in others {
+                                     display_items.push(format!("{} {}", n, v));
+                                 }
+
+                                 if !display_items.is_empty() {
+                                     ui.label(
+                                         egui::RichText::new(display_items.join("  |  "))
+                                         .size(11.0)
+                                         .color(ui.visuals().weak_text_color())
+                                     );
+                                 }
+                             }
+                        });
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             match &m.status {
@@ -382,6 +487,7 @@ impl ModUpdaterApp {
                             }
                         });
                     });
+                    ui.separator();
                 }
             }
         });

@@ -109,16 +109,33 @@ pub fn read_single_mod(path: &Path) -> Result<ModInfo, String> {
 
     let key = path.file_name().and_then(|s| s.to_str()).unwrap_or(&mod_json.name).to_string();
 
+    let depends = mod_json.depends.map(|deps| {
+        deps.into_iter().filter_map(|(k, v)| {
+            match v {
+                serde_json::Value::String(s) => Some((k, s)),
+                serde_json::Value::Array(arr) => {
+                     let s = arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect::<Vec<_>>()
+                        .join(" || "); // approximation
+                     if s.is_empty() { None } else { Some((k, s)) }
+                },
+                _ => None,
+            }
+        }).collect()
+    });
+
     Ok(ModInfo {
         key: key.clone(),
         name: mod_json.name,
         detected_project_id: Some(mod_json.id),
         confirmed_project_id: None,
-        version_local: None,
+        version_local: mod_json.version,
         version_remote: None,
         selected: true,
         file_size_bytes: None,
         file_mtime_secs: None,
+        depends,
     })
 }
 

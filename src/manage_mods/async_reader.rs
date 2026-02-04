@@ -27,7 +27,7 @@ pub fn spawn_read_workers(n: usize, rx: Receiver<ReadJob>, tx: Sender<ReadEvent>
                         let _ = tx.send(ReadEvent::Done { info });
                     }
                     Err(e) => {
-                         let _ = tx.send(ReadEvent::Error { path: job.file_path, msg: e });
+                        let _ = tx.send(ReadEvent::Error { path: job.file_path, msg: e });
                     }
                 }
             }

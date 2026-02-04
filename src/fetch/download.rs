@@ -13,6 +13,8 @@ pub enum DownloadEvent {
     Resolved { key: String },
     ResolvedInfo { key: String, confirmed_project_id: Option<String>, version_remote: Option<String> },
     Started { key: String },
+
+    Progress(String, f32), // key, 0.0-1.0
     Done { key: String },
     Error { key: String, msg: String },
 }

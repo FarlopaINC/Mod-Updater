@@ -58,16 +58,14 @@ impl ProfilesDatabase {
 }
 
 // Persistencia
+// Persistencia
 fn profiles_path() -> Option<PathBuf> {
-    if let Some(mut dir) = dirs::config_dir() {
-        dir.push("mods_updater");
-        if !dir.exists() {
-            let _ = fs::create_dir_all(&dir);
-        }
-        dir.push("profiles.json");
-        return Some(dir);
+    use crate::paths_vars::PATHS;
+    let dir = &PATHS.modpacks_folder;
+    if !dir.exists() {
+        let _ = fs::create_dir_all(dir);
     }
-    None
+    Some(dir.join("profiles.json"))
 }
 
 pub fn load_profiles() -> ProfilesDatabase {

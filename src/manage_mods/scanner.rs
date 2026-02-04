@@ -196,8 +196,7 @@ pub fn list_modpacks() -> Vec<String> {
         .unwrap()
         .filter_map(|entry| entry.ok())
         .filter(|entry| entry.file_type().unwrap().is_dir())
-        .filter(|entry| entry.file_name().to_str().unwrap().starts_with("mods"))
-        .map(|entry| entry.file_name().to_str().unwrap().to_string())
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
         .collect::<Vec<_>>();
 
     let mut sorted = entries;

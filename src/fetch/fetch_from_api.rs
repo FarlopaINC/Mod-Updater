@@ -38,7 +38,7 @@ pub fn find_mod_download(mod_name: &str, mod_id: Option<&str>, game_version: &st
 
     // --- 1. Intento por ID (Si existe) ---
     if let Some(id) = mod_id {
-        let hits = search_modrinth_project(id);
+        let hits = search_modrinth_project(id, &None, &None, 0, 5);
         for hit in &hits {
             if hit.slug == id {
                  if let Some(info) = try_find_version(hit) {
@@ -49,7 +49,7 @@ pub fn find_mod_download(mod_name: &str, mod_id: Option<&str>, game_version: &st
     }
 
     // --- 2. Intento por Nombre (Fallback) ---
-    let hits = search_modrinth_project(mod_name);
+    let hits = search_modrinth_project(mod_name, &None, &None, 0, 5);
     for hit in &hits {
         let slug_match = mod_id.map_or(false, |id| hit.slug == id);
         let name_match = hit.title.to_lowercase().contains(&mod_name.to_lowercase()) || mod_name.to_lowercase().contains(&hit.title.to_lowercase());
@@ -109,26 +109,55 @@ struct ModrinthSearchResults {
     hits: Vec<ModrinthSearchHit>,
 }
 
-#[derive(Debug, Deserialize)]
+
+#[derive(Debug, Deserialize, Clone)]
 pub struct ModrinthSearchHit {
     pub project_id: String,
     pub slug: String,
     pub title: String,
+    pub description: Option<String>,
+    pub icon_url: Option<String>,
+    pub author: String,
 }
 
 fn build_modrinth_client() -> Client {
     Client::builder().user_agent("ModsUpdater/1.0 (github.com/FarlopaINC)").build().unwrap()
 }
 
-pub fn search_modrinth_project(query: &str) -> Vec<ModrinthSearchHit> {
+pub fn search_modrinth_project(query: &str, loader: &Option<String>, version: &Option<String>, offset: u32, limit: u32) -> Vec<ModrinthSearchHit> {
     let client = build_modrinth_client();
     let search_url = "https://api.modrinth.com/v2/search";
     
-    // Solicitamos 5 resultados para manejar ambigüedades
-    let params = [
+    let mut facets = Vec::new();
+    if let Some(v) = version {
+        if !v.trim().is_empty() {
+             facets.push(format!("[\"versions:{}\"]", v));
+        }
+    }
+    if let Some(l) = loader {
+        if !l.trim().is_empty() {
+            facets.push(format!("[\"categories:{}\"]", l.to_lowercase()));
+        }
+    }
+    
+    let facets_str = if facets.is_empty() {
+        String::new()
+    } else {
+        format!("[{}]", facets.join(","))
+    };
+
+    let limit_str = limit.to_string();
+    let offset_str = offset.to_string();
+    
+    let mut params = vec![
         ("query", query),
-        ("limit", "5")
+        ("limit", &limit_str),
+        ("offset", &offset_str),
     ];
+    
+    if !facets.is_empty() {
+        params.push(("facets", &facets_str));
+    }
 
     match client.get(search_url).query(&params).send() {
         Ok(resp) => {
@@ -180,10 +209,25 @@ struct ApiResponse<T> {
     data: T,
 }
 
-#[derive(Debug, Deserialize)]
-struct CurseMod {
-    id: u32,
-    slug: String,
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CurseMod {
+    pub id: u32,
+    pub name: String,
+    pub slug: String,
+    pub summary: Option<String>,
+    pub logo: Option<CurseLogo>,
+    pub links: Option<CurseLinks>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct CurseLogo {
+    pub thumbnail_url: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct CurseLinks {
+    pub website_url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -205,31 +249,65 @@ fn build_curse_client(api_key: &str) -> Client {
         .unwrap()
 }
 
-pub fn fetch_curseforge_project_id(mod_name: &str, api_key: &str) -> Option<u32> {
+pub fn search_curseforge(query: &str, api_key: &str, loader: &Option<String>, version: &Option<String>, offset: u32, limit: u32) -> Vec<CurseMod> {
     let client = build_curse_client(api_key);
     let search_url = "https://api.curseforge.com/v1/mods/search";
     
-    // Parámetros seguros con codificación automática
-    let params = [
+    let limit_str = limit.to_string();
+    let offset_str = offset.to_string();
+    
+    let mut params = vec![
         ("gameId", "432"),
-        ("searchFilter", mod_name)
+        ("searchFilter", query),
+        ("sortField", "2"), // Relevance
+        ("sortOrder", "desc"),
+        ("pageSize", &limit_str),
+        ("index", &offset_str),
     ];
+    
+    if let Some(v) = version {
+        if !v.trim().is_empty() {
+            params.push(("gameVersion", v));
+        }
+    }
+    
+    // Map loader to CurseForge ID
+    // 1 = Forge, 4 = Fabric, 5 = Quilt, 6 = NeoForge
+    let loader_id_opt = if let Some(l) = loader {
+         match l.to_lowercase().as_str() {
+            "forge" => Some("1"),
+            "fabric" => Some("4"),
+            "quilt" => Some("5"),
+            "neoforge" => Some("6"),
+            _ => None, 
+        }
+    } else {
+        None
+    };
+
+    if let Some(lid) = loader_id_opt {
+        params.push(("modLoaderType", lid));
+    }
 
     match client.get(search_url).query(&params).send() {
         Ok(resp) => {
             if resp.status().is_success() {
-                let results: ApiResponse<Vec<CurseMod>> = resp.json().unwrap();
-                results.data.first().map(|mod_info| mod_info.id)
+                let results: ApiResponse<Vec<CurseMod>> = resp.json().unwrap_or(ApiResponse { data: vec![] });
+                return results.data;
             } else {
-                println!("❌ Error al buscar '{}' en CurseAPI (status {})", mod_name, resp.status());
-                None
+                println!("❌ Error al buscar '{}' en CurseAPI (status {})", query, resp.status());
             }
         }
         Err(e) => {
             println!("❌ Error de conexión al buscar en CurseForge: {}", e);
-            None
         }
     }
+    return vec![];
+}
+
+pub fn fetch_curseforge_project_id(mod_name: &str, api_key: &str) -> Option<u32> {
+    let results = search_curseforge(mod_name, api_key, &None, &None, 0, 10);
+    results.first().map(|m| m.id)
 }
 
 pub fn fetch_curseforge_version_file(mod_id: u32, game_version: &str, loader: &str, api_key: &str) -> Option<CurseFile> {

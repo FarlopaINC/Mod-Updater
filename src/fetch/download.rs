@@ -57,12 +57,12 @@ pub fn spawn_workers(n: usize, rx: Receiver<DownloadJob>, tx_events: Sender<Down
                         // Since `find_mod_download` verified it, we can trust the ID if provided, 
                         // or we can search again to populate the cache ID.
                         
-                        let hits = fetch_from_api::search_modrinth_project(mod_id_candidate.unwrap_or(&mi.name));
+                        let hits = fetch_from_api::search_modrinth_project(mod_id_candidate.unwrap_or(&mi.name), &None, &None, 0, 5);
                         // Pick the best hit (first one usually if ID matched, or first name match)
                         if let Some(hit) = hits.first() {
                              confirmed_project_id = Some(hit.project_id.clone());
                              // Check if version exists to set version_remote
-                             if let Some(v) = fetch_from_api::fetch_modrinth_version(&hit.project_id, &job.selected_version, &job.selected_loader) {
+                             if let Some(_v) = fetch_from_api::fetch_modrinth_version(&hit.project_id, &job.selected_version, &job.selected_loader) {
                                  version_remote = Some(job.selected_version.clone());
                                  // loaders = v.loaders; // This line was commented out as 'loaders' is not defined in this scope.
                              }

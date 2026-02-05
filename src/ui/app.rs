@@ -10,7 +10,43 @@ use indexmap::IndexMap;
 use std::ops::{Deref, DerefMut};
 use crossbeam_channel::{unbounded, Sender, Receiver};
 use crate::fetch::download::{spawn_workers, DownloadJob, DownloadEvent};
+use crate::fetch::search::{UnifiedSearchResult, search_unified, SearchRequest};
 use crate::paths_vars::PATHS;
+use std::thread;
+
+#[derive(PartialEq, Eq, Clone, Debug)]
+pub enum SearchSource {
+    Explorer,
+    Profile(String),
+}
+
+pub struct SearchState {
+    pub query: String,
+    pub loader: String,
+    pub version: String,
+    pub results: Vec<UnifiedSearchResult>,
+    pub is_searching: bool,
+    pub open: bool,
+    pub source: SearchSource,
+    pub page: u32,
+    pub limit: u32,
+}
+
+impl Default for SearchState {
+    fn default() -> Self {
+        Self {
+            query: String::new(),
+            loader: "Fabric".to_string(), // Default, will be overwritten by app selection
+            version: "1.20.1".to_string(),
+            results: Vec::new(),
+            is_searching: false,
+            open: false,
+            source: SearchSource::Explorer,
+            page: 0,
+            limit: 10,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum ModStatus {
@@ -104,6 +140,11 @@ pub struct ModUpdaterApp {
     
     // --- Global Download State ---
     pub active_downloads: HashMap<String, ModStatus>,
+
+    // --- Search State ---
+    pub search_state: SearchState,
+    tx_search: Sender<(SearchRequest, SearchSource)>, // Request, Source
+    rx_search: Receiver<(Vec<UnifiedSearchResult>, SearchSource, u32)>, // Results, Source, Offset
 }
 
 fn format_version_range(v: &str) -> String {
@@ -207,6 +248,22 @@ impl ModUpdaterApp {
         // Spawn read workers
         spawn_read_workers(workers, rx_read_jobs, tx_read_events.clone());
 
+        // Search Channel
+        let (tx_search, rx_search_req) = unbounded::<(SearchRequest, SearchSource)>();
+        let (tx_search_res, rx_search) = unbounded();
+        
+        // Spawn Search Worker
+        {
+            let tx_res = tx_search_res.clone();
+            thread::spawn(move || {
+                while let Ok((req, source)) = rx_search_req.recv() {
+                    let offset = req.offset;
+                    let results = search_unified(&req);
+                    let _ = tx_res.send((results, source, offset));
+                }
+            });
+        }
+
         // Load Profiles and Memory
         let profiles_db = load_profiles();
         let memory = load_memory();
@@ -214,7 +271,7 @@ impl ModUpdaterApp {
         return Self { 
             mods: ui_mods, 
             mc_versions, 
-            selected_mc_version, 
+            selected_mc_version: selected_mc_version.clone(), 
             tx_jobs, 
             rx_events,
             tx_read_jobs,
@@ -235,7 +292,16 @@ impl ModUpdaterApp {
             download_confirmation_name: None,
             download_source: DownloadSource::Explorer,
             create_profile_modal_name: None,
+
             active_downloads: HashMap::new(),
+            
+            search_state: SearchState {
+                 loader: "Fabric".to_string(), // Initial default
+                 version: selected_mc_version.clone(),
+                 ..Default::default()
+            },
+            tx_search,
+            rx_search,
         };
     }
 
@@ -398,6 +464,18 @@ impl ModUpdaterApp {
                         }
                     }
                     self.status_msg = "Actualizando lista de mods...".to_string();
+            }
+
+            if ui.button("🔍 Buscar Mods").clicked() {
+                self.search_state.open = true;
+                self.search_state.source = SearchSource::Explorer;
+                // Sync defaults with current selection if first open or reset?
+                self.search_state.version = self.selected_mc_version.clone();
+                self.search_state.loader = self.selected_loader.clone();
+                
+                self.search_state.results.clear();
+                self.search_state.query.clear();
+                self.search_state.page = 0;
             }
 
             if ui.button(" ⬇ ")
@@ -566,6 +644,19 @@ impl ModUpdaterApp {
                             should_save = true;
                             self.status_msg = "Perfil guardado.".to_string();
                         }
+                        ui.add_space(5.0);
+                        if ui.add_sized([40.0, 40.0], egui::Button::new("🔍")).on_hover_text("Buscar / Añadir Mod").clicked() {
+                             self.search_state.open = true;
+                             self.search_state.source = SearchSource::Profile(name.clone());
+                             
+                             // Sync defaults
+                             self.search_state.version = self.selected_mc_version.clone();
+                             self.search_state.loader = self.selected_loader.clone();
+
+                             self.search_state.results.clear();
+                             self.search_state.query.clear();
+                             self.search_state.page = 0;
+                        }
                     });
                 });
                 
@@ -593,15 +684,15 @@ impl ModUpdaterApp {
                                 
                                 // Show progress if downloading
                                 if let Some(status) = self.active_downloads.get(k) {
-                                     match status {
-                                         ModStatus::Downloading(p) => {
-                                             ui.add(egui::ProgressBar::new(*p).show_percentage());
-                                         },
-                                         ModStatus::Resolving => { ui.label("Resolviendo..."); },
-                                         ModStatus::Done => { ui.label("✔"); },
-                                         ModStatus::Error(e) => { ui.label(egui::RichText::new(format!("Error: {}", e)).color(egui::Color32::RED)); },
-                                         _ => {}
-                                     }
+                                    match status {
+                                        ModStatus::Downloading(p) => {
+                                            ui.add(egui::ProgressBar::new(*p).show_percentage());
+                                        },
+                                        ModStatus::Resolving => { ui.label("Resolviendo..."); },
+                                        ModStatus::Done => { ui.label("✔"); },
+                                        ModStatus::Error(e) => { ui.label(egui::RichText::new(format!("Error: {}", e)).color(egui::Color32::RED)); },
+                                        _ => {}
+                                    }
                                 }
 
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -670,6 +761,10 @@ impl eframe::App for ModUpdaterApp {
                 if ui.selectable_label(self.current_tab == AppTab::Profiles, "👥 Perfiles").clicked() {
                     self.current_tab = AppTab::Profiles;
                 }
+                
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                     // Removed Search Button from here
+                });
             });
         });
 
@@ -990,5 +1085,238 @@ impl eframe::App for ModUpdaterApp {
                 self.create_profile_modal_name = Some(name);
             }
         }
+
+        // --- Search Modal ---
+        self.render_search_modal(ctx);
+
+        // --- Search Results Poll ---
+        while let Ok((new_results, _source, offset)) = self.rx_search.try_recv() {
+            if offset == 0 {
+                self.search_state.results = new_results;
+            } else {
+                self.search_state.results.extend(new_results);
+            }
+            self.search_state.is_searching = false;
+        }
     }
+}
+
+impl ModUpdaterApp {
+    fn render_search_modal(&mut self, ctx: &egui::Context) {
+        let mut open = self.search_state.open;
+        if !open { return; }
+
+         let title = if let SearchSource::Profile(p) = &self.search_state.source {
+             format!("🔍 Buscar Mods para '{}'", p)
+         } else {
+             "🔍 Buscar Mods (Descargar)".to_string()
+         };
+
+        egui::Window::new(&title)
+            .open(&mut open)
+            .resize(|r| r.fixed_size(egui::vec2(700.0, 600.0))) // Start larger
+            .show(ctx, |ui| {
+                // Filters Row (Only for Explorer / Direct Download)
+                let is_explorer = matches!(self.search_state.source, SearchSource::Explorer);
+                
+                if is_explorer {
+                    ui.horizontal(|ui| {
+                        ui.label("Loader:");
+                        egui::ComboBox::from_id_salt("search_loader")
+                            .selected_text(&self.search_state.loader)
+                            .show_ui(ui, |ui| {
+                                for l in &self.loaders {
+                                    ui.selectable_value(&mut self.search_state.loader, l.clone(), l);
+                                }
+                            });
+
+                        ui.label("Versión:");
+                        egui::ComboBox::from_id_salt("search_version_selector")
+                            .selected_text(&self.search_state.version)
+                            .show_ui(ui, |ui| {
+                                for v in &self.mc_versions {
+                                    ui.selectable_value(&mut self.search_state.version, v.clone(), v);
+                                }
+                            });
+                    });
+                    ui.add_space(5.0);
+                }
+
+                ui.horizontal(|ui| {
+                    ui.label("Buscar:");
+                    let text_box = ui.text_edit_singleline(&mut self.search_state.query);
+                    
+                    let mut do_search = false;
+
+                    if text_box.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                         do_search = true;
+                    }
+                    if ui.button("Buscar").clicked() {
+                         do_search = true;
+                    }
+
+                    if do_search {
+                        if !self.search_state.query.trim().is_empty() {
+                            self.search_state.is_searching = true;
+                            self.search_state.page = 0;
+                            self.search_state.results.clear();
+                            
+                            let (loader, version) = if is_explorer {
+                                (Some(self.search_state.loader.clone()), Some(self.search_state.version.clone()))
+                            } else {
+                                (None, None)
+                            };
+
+                            let req = SearchRequest {
+                                query: self.search_state.query.clone(),
+                                loader,
+                                version,
+                                offset: 0,
+                                limit: self.search_state.limit,
+                            };
+                            let _ = self.tx_search.send((req, self.search_state.source.clone()));
+                        }
+                    }
+                });
+                
+                if self.search_state.is_searching && self.search_state.page == 0 {
+                    ui.spinner();
+                    ui.label("Buscando en Modrinth y CurseForge...");
+                }
+
+                ui.separator();
+
+                egui::ScrollArea::vertical().max_height(450.0).show(ui, |ui| {
+                    for res in &self.search_state.results {
+                        ui.group(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.heading(&res.name);
+                                    ui.label(egui::RichText::new(&res.author).weak());
+                                    // Use small truncate or multiline?
+                                    ui.label(egui::RichText::new(&res.description).weak().size(10.0));
+                                    
+                                    ui.horizontal(|ui| {
+                                        if res.modrinth_id.is_some() { ui.label(egui::RichText::new("Modrinth").color(egui::Color32::GREEN)); }
+                                        if res.curseforge_id.is_some() { ui.label(egui::RichText::new("CurseForge").color(egui::Color32::ORANGE)); }
+                                    });
+                                });
+
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    // Contextual Action
+                                    match &self.search_state.source {
+                                        SearchSource::Explorer => {
+                                            // Check progress by name
+                                            if let Some(status) = self.active_downloads.get(&res.name) {
+                                                match status {
+                                                    ModStatus::Downloading(p) => { ui.add(egui::ProgressBar::new(*p).show_percentage().animate(true)); },
+                                                    ModStatus::Resolving => { ui.spinner(); ui.label("Resolviendo..."); },
+                                                    ModStatus::Done => { ui.label("✔ Instalado"); },
+                                                    ModStatus::Error(e) => { ui.colored_label(egui::Color32::RED, "Error"); ui.label(e); },
+                                                    _ => {}
+                                                }
+                                            } else {
+                                                if ui.button("📥 Descargar").clicked() {
+                                                    // Trigger Download
+                                                    // Construct ModInfo
+                                                    let mod_info = crate::manage_mods::ModInfo {
+                                                        key: res.name.clone(), 
+                                                        name: res.name.clone(),
+                                                        detected_project_id: res.modrinth_id.clone().or_else(|| Some(res.slug.clone())),
+                                                        confirmed_project_id: res.modrinth_id.clone().or_else(|| res.curseforge_id.map(|id| id.to_string())),
+                                                        version_local: Some("".to_string()),
+                                                        version_remote: None,
+                                                        selected: true,
+                                                        file_size_bytes: None,
+                                                        file_mtime_secs: None,
+                                                        depends: None,
+                                                    };
+                                                    
+                                                    // Output folder
+                                                    let output_folder_path = if let Some(mp) = &self.selected_modpack_ui {
+                                                        PATHS.modpacks_folder.join(mp)
+                                                    } else {
+                                                        crate::manage_mods::prepare_output_folder(&self.selected_mc_version);
+                                                        PATHS.modpacks_folder.join(format!(r"mods{}", self.selected_mc_version))
+                                                    };
+                                                    let _ = std::fs::create_dir_all(&output_folder_path);
+
+                                                    let job = DownloadJob {
+                                                        key: res.name.clone(),
+                                                        modinfo: mod_info.clone(),
+                                                        output_folder: output_folder_path.to_string_lossy().to_string(),
+                                                        selected_version: self.search_state.version.clone(), // Use search version
+                                                        selected_loader: self.search_state.loader.clone(), // Use search loader
+                                                    };
+                                                    let _ = self.tx_jobs.send(job);
+                                                    
+                                                    // Mark as resolving locally
+                                                    self.active_downloads.insert(res.name.clone(), ModStatus::Resolving);
+                                                }
+                                            }
+                                        },
+                                        SearchSource::Profile(p_name) => {
+                                            if ui.button("➕ Añadir").clicked() {
+                                                if let Some(profile) = self.profiles_db.get_profile_mut(p_name) {
+                                                    // Add to profile
+                                                    let mod_info = crate::manage_mods::ModInfo {
+                                                    key: res.name.clone(),
+                                                    name: res.name.clone(),
+                                                    detected_project_id: res.modrinth_id.clone(),
+                                                    confirmed_project_id: res.modrinth_id.clone().or_else(|| res.curseforge_id.map(|id| id.to_string())),
+                                                    version_local: Some("Universal".to_string()), 
+                                                    version_remote: None,
+                                                    selected: true,
+                                                    file_size_bytes: None,
+                                                    file_mtime_secs: None,
+                                                    depends: None,
+                                                };
+                                                profile.mods.insert(res.name.clone(), mod_info);
+                                                }
+                                                // save_profiles(&self.profiles_db); // Auto-save happens in update logic for profiles? No, explicits.
+                                                // We should save here.
+                                                save_profiles(&self.profiles_db);
+                                                self.status_msg = format!("Mod '{}' añadido al perfil.", res.name);
+                                            }
+                                        }
+                                    }
+                                });
+                            });
+                        });
+                    }
+                    
+                    if !self.search_state.results.is_empty() {
+                        ui.add_space(10.0);
+                        if self.search_state.is_searching {
+                            ui.spinner();
+                        } else {
+                            if ui.button("⬇ Cargar más resultados").clicked() {
+                                self.search_state.is_searching = true;
+                                self.search_state.page += 1;
+                                let offset = self.search_state.page * self.search_state.limit;
+                                
+                                let is_explorer = matches!(self.search_state.source, SearchSource::Explorer);
+                                let (loader, version) = if is_explorer {
+                                    (Some(self.search_state.loader.clone()), Some(self.search_state.version.clone()))
+                                } else {
+                                    (None, None)
+                                };
+
+                                let req = SearchRequest {
+                                    query: self.search_state.query.clone(),
+                                    loader,
+                                    version,
+                                    offset,
+                                    limit: self.search_state.limit,
+                                };
+                                let _ = self.tx_search.send((req, self.search_state.source.clone()));
+                            }
+                        }
+                    }
+                });
+
+            });
+        
+        self.search_state.open = open;
+    } 
 }

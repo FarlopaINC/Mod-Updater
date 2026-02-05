@@ -1,13 +1,8 @@
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
-mod manage_mods;
-mod fetch;
-mod ui;
-mod paths_vars;
-
-use crate::ui::app::ModUpdaterApp;
-use crate::manage_mods::{read_mods_in_folder, save_cache, load_cache};
-use crate::paths_vars::PATHS;
+use mods_updater::ui::app::ModUpdaterApp;
+use mods_updater::manage_mods::{read_mods_in_folder, save_cache, load_cache};
+use mods_updater::paths_vars::PATHS;
 
 fn main() {
     // Leemos los mods detectados en carpeta

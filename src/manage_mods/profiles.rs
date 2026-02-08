@@ -58,7 +58,6 @@ impl ProfilesDatabase {
 }
 
 // Persistencia
-// Persistencia
 fn profiles_path() -> Option<PathBuf> {
     use crate::paths_vars::PATHS;
     let dir = &PATHS.modpacks_folder;

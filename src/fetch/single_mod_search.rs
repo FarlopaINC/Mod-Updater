@@ -1,4 +1,4 @@
-use super::fetch_from_api;
+use super::{modrinth_api, curseforge_api};
 use std::env;
 
 #[derive(Debug, Clone)]
@@ -27,7 +27,7 @@ pub fn search_unified(req: &SearchRequest) -> Vec<UnifiedSearchResult> {
     let mut results = Vec::new();
     
     // 1. Modrinth Search
-    let modrinth_hits = fetch_from_api::search_modrinth_project(&req.query, &req.loader, &req.version, req.offset, req.limit);
+    let modrinth_hits = modrinth_api::search_modrinth_project(&req.query, &req.loader, &req.version, req.offset, req.limit);
     for hit in modrinth_hits {
         results.push(UnifiedSearchResult {
             name: hit.title,
@@ -43,7 +43,7 @@ pub fn search_unified(req: &SearchRequest) -> Vec<UnifiedSearchResult> {
     // 2. CurseForge Search
     let cf_key = env::var("CURSEFORGE_API_KEY").unwrap_or_default();
     if !cf_key.is_empty() {
-        let curse_hits = fetch_from_api::search_curseforge(&req.query, &cf_key, &req.loader, &req.version, req.offset, req.limit);
+        let curse_hits = curseforge_api::search_curseforge(&req.query, &cf_key, &req.loader, &req.version, req.offset, req.limit);
         for hit in curse_hits {
             // Check for duplicates (primitive dedup by name or slug)
             if let Some(existing) = results.iter_mut().find(|r| r.slug == hit.slug || r.name == hit.name) {
@@ -68,6 +68,5 @@ pub fn search_unified(req: &SearchRequest) -> Vec<UnifiedSearchResult> {
             }
         }
     }
-
-    results
+    return results;
 }

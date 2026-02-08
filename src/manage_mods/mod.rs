@@ -9,6 +9,5 @@ pub use models::*;
 pub use scanner::*;
 pub use fs_ops::*;
 pub use profiles::*;
-
 pub use memory::*;
 pub use async_reader::*;

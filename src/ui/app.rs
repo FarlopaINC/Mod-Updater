@@ -1,18 +1,20 @@
 use eframe::{egui, egui::CentralPanel};
 use std::collections::{HashSet, HashMap};
 use eframe::egui::{ScrollArea, SidePanel, TopBottomPanel};
+use std::ops::{Deref, DerefMut};
+use crossbeam_channel::{unbounded, Sender, Receiver};
+use std::thread;
+use indexmap::IndexMap;
+
 use crate::manage_mods::{
     change_mods, list_modpacks, get_minecraft_versions, read_active_marker,
     spawn_read_workers, ReadJob, ReadEvent,
     ModInfo, ProfilesDatabase, TroubleshootMemory, load_profiles, save_profiles, load_memory, Profile 
 };
-use indexmap::IndexMap;
-use std::ops::{Deref, DerefMut};
-use crossbeam_channel::{unbounded, Sender, Receiver};
-use crate::fetch::download::{spawn_workers, DownloadJob, DownloadEvent};
-use crate::fetch::search::{UnifiedSearchResult, search_unified, SearchRequest};
+use crate::fetch::async_download::{spawn_workers, DownloadJob, DownloadEvent};
+use crate::fetch::single_mod_search::{UnifiedSearchResult, search_unified, SearchRequest};
 use crate::paths_vars::PATHS;
-use std::thread;
+use super::utils::{format_dep_name, format_version_range};  
 
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub enum SearchSource {
@@ -147,57 +149,6 @@ pub struct ModUpdaterApp {
     rx_search: Receiver<(Vec<UnifiedSearchResult>, SearchSource, u32)>, // Results, Source, Offset
 }
 
-fn format_version_range(v: &str) -> String {
-    if v == "*" { return "*".to_string(); }
-    
-    // Strip operators to isolate versions
-    let s = v.replace(">=", "")
-             .replace("<=", "")
-             .replace(">", "")
-             .replace("<", "");
-
-    // Split by whitespace to process individual version segments
-    let parts: Vec<String> = s.split_whitespace()
-        .map(|part| {
-            let mut p = part.to_string();
-            // User requested removal of trailing hyphens (e.g. "1.21.10-" -> "1.21.10")
-            if p.ends_with('-') { p.pop(); }
-            p
-        })
-        .collect();
-
-    if parts.is_empty() { return v.to_string(); }
-
-    if parts.len() >= 2 {
-        // It's likely a range: "1.21.10" "1.21.11" -> "1.21.10 - 1.21.11"
-        return parts.join(" - ");
-    } else {
-        // Single version constraint
-        let val = &parts[0];
-        if v.contains('>') {
-            return format!("{} +", val);
-        } else if v.contains('<') {
-            return format!("{} -", val);
-        } else {
-            return val.clone();
-        }
-    }
-}
-
-fn format_dep_name(k: &str) -> String {
-    match k {
-        "fabricloader" => "Fabric".to_string(),
-        "fabric-loader" => "Fabric".to_string(),
-        "forge" => "Forge".to_string(),
-        "neoforge" => "NeoForge".to_string(),
-        "quilt_loader" => "Quilt".to_string(),
-        "minecraft" => "Minecraft".to_string(),
-        "java" => "Java".to_string(),
-        "fabric-api" => "Fabric API".to_string(),
-        _ => k.to_string(), // fallback
-    }
-}
-
 impl ModUpdaterApp {
     pub fn new(mods: IndexMap<String, ModInfo>) -> Self {
         let mc_versions = get_minecraft_versions(&PATHS.versions_folder
@@ -225,15 +176,9 @@ impl ModUpdaterApp {
         let (tx_jobs, rx_jobs) = unbounded();
         let (tx_events, rx_events) = unbounded();
 
-        // Compute worker count based on system and number of mods
+        // Compute worker count using shared utility
         let mods_count = ui_mods.len();
-        let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-        
-        // Dynamic worker calculation:
-        // - Small mod counts: 1 worker per mod (min(mods, max_workers))
-        // - Large mod counts: Up to 8 workers per cpu, capped at 64
-        let max_workers = (cpus * 8).clamp(4, 64);
-        let workers = std::cmp::min(mods_count, max_workers).max(1);
+        let workers = crate::ui::utils::calculate_worker_count(mods_count);
 
         spawn_workers(workers, rx_jobs, tx_events);
 
@@ -285,7 +230,15 @@ impl ModUpdaterApp {
             selected_profile_name: None,
             profile_mods_pending_deletion: HashSet::new(),
 
-            loaders: vec!["Fabric".to_string(), "Forge".to_string(), "NeoForge".to_string(),"Quilt".to_string()],
+            loaders: vec![
+                "Fabric".to_string(), 
+                "Forge".to_string(), 
+                "NeoForge".to_string(),
+                "Quilt".to_string(),
+                "Any".to_string(),
+                "Cauldron".to_string(),
+                "LiteLoader".to_string()
+            ],
             selected_loader: "Fabric".to_string(),
             selected_modpack_ui: None,
 
@@ -762,7 +715,7 @@ impl eframe::App for ModUpdaterApp {
                     self.current_tab = AppTab::Profiles;
                 }
                 
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |_ui| {
                      // Removed Search Button from here
                 });
             });

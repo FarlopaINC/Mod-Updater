@@ -164,5 +164,3 @@ pub fn list_modpacks() -> Vec<String> {
     entries.sort();
     entries
 }
-
-

@@ -560,10 +560,9 @@ impl ModUpdaterApp {
                                         }
                                     }
                                 },
-                                ModStatus::Resolving => { tui_theme::tui_status(ui, "[...]", tui_theme::NEON_YELLOW); },
-                                ModStatus::Downloading(p) => { tui_theme::tui_status(ui, &format!("[{:.0}%]", p * 100.0), tui_theme::NEON_YELLOW); },
-                                ModStatus::Done => { tui_theme::tui_status(ui, "[OK]", tui_theme::SUCCESS); },
-                                ModStatus::Error(_msg) => { tui_theme::tui_status(ui, "[ERR]", tui_theme::ERROR); },
+                                ModStatus::Resolving | ModStatus::Downloading(_) | ModStatus::Done | ModStatus::Error(_) => {
+                                    // Download progress is shown in the DESCARGA window
+                                },
                             }
                         });
                     });
@@ -680,17 +679,7 @@ impl ModUpdaterApp {
                                     .family(egui::FontFamily::Monospace)
                                     .color(tui_theme::TEXT_PRIMARY));
                                 
-                                if let Some(status) = self.active_downloads.get(k) {
-                                    match status {
-                                        ModStatus::Downloading(p) => {
-                                            tui_theme::tui_status(ui, &format!("[{:.0}%]", p * 100.0), tui_theme::NEON_YELLOW);
-                                        },
-                                        ModStatus::Resolving => { tui_theme::tui_status(ui, "[...]", tui_theme::NEON_YELLOW); },
-                                        ModStatus::Done => { tui_theme::tui_status(ui, "[OK]", tui_theme::NEON_GREEN); },
-                                        ModStatus::Error(e) => { tui_theme::tui_status(ui, &format!("[ERR: {}]", e), tui_theme::NEON_RED); },
-                                        _ => {}
-                                    }
-                                }
+                                // Download status is shown in DESCARGA window
 
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     ui.add_space(15.0);
@@ -792,8 +781,8 @@ impl eframe::App for ModUpdaterApp {
                     if let Some(m) = self.mods.get_mut(&key) { m.status = ModStatus::Resolving; }
                 }
                 DownloadEvent::Resolved { key } => {
-                     // Maybe idle or keep resolving?
-                     if let Some(m) = self.mods.get_mut(&key) { m.status = ModStatus::Idle; }
+                    // Maybe idle or keep resolving?
+                    if let Some(m) = self.mods.get_mut(&key) { m.status = ModStatus::Idle; }
                 }
                 DownloadEvent::Started { key } => {
                     self.active_downloads.insert(key.clone(), ModStatus::Downloading(0.0));
@@ -816,9 +805,9 @@ impl eframe::App for ModUpdaterApp {
                     if let Some(m) = self.mods.get_mut(&key) { m.status = ModStatus::Done; m.progress = 1.0; }
                 }
                 DownloadEvent::Error { key, msg } => {
-                     self.active_downloads.insert(key.clone(), ModStatus::Error(msg.clone()));
-                     // Log error to status if urgent, otherwise just mark mod
-                     if let Some(m) = self.mods.get_mut(&key) { m.status = ModStatus::Error(msg); }
+                    self.active_downloads.insert(key.clone(), ModStatus::Error(msg.clone()));
+                    // Log error to status if urgent, otherwise just mark mod
+                    if let Some(m) = self.mods.get_mut(&key) { m.status = ModStatus::Error(msg); }
                 }
             }
         }
@@ -850,23 +839,22 @@ impl eframe::App for ModUpdaterApp {
         // --- Global Deletion Modal ---
         if self.deletion_confirmation != DeletionConfirmation::None {
             egui::Window::new("CONFIRMAR")
-                .collapsible(false)
+                .collapsible(true)
                 .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .show(ctx, |ui| {
                     match &self.deletion_confirmation {
                         DeletionConfirmation::Modpack(name) => { tui_dim(ui, &format!("Borrar modpack '{}' de disco?", name)); },
                         DeletionConfirmation::SelectedMods => {
-                             if let Some(mp) = &self.selected_modpack_ui {
-                                 if self.active_modpack.as_ref() == Some(mp) {
-                                     tui_theme::tui_status(ui, "[!] MODPACK ACTIVO", tui_theme::WARNING);
-                                     tui_dim(ui, "Se borraran mods del modpack Y del juego.");
-                                 } else {
-                                     tui_dim(ui, "Borrar mods seleccionados del modpack?");
-                                 }
-                             } else {
-                                 tui_dim(ui, "Borrar mods seleccionados de disco?");
-                             }
+                            if let Some(mp) = &self.selected_modpack_ui {
+                                if self.active_modpack.as_ref() == Some(mp) {
+                                    tui_theme::tui_status(ui, "[!] MODPACK ACTIVO", tui_theme::WARNING);
+                                    tui_dim(ui, "Se borraran mods del modpack Y del juego.");
+                                } else {
+                                    tui_dim(ui, "Borrar mods seleccionados del modpack?");
+                                }
+                            } else {
+                                tui_dim(ui, "Borrar mods seleccionados de disco?");
+                            }
                         },
                         DeletionConfirmation::Profile(name) => { tui_dim(ui, &format!("Borrar perfil '{}'? (No borra archivos)", name)); },
                         DeletionConfirmation::None => {},
@@ -948,9 +936,8 @@ impl eframe::App for ModUpdaterApp {
             let mut close_requested = false;
 
             egui::Window::new("DESCARGA")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .collapsible(true)
+                .resizable(true)
                 .open(&mut open)
                 .show(ctx, |ui| {
                     tui_dim(ui, "Carpeta del Modpack:");
@@ -1033,10 +1020,81 @@ impl eframe::App for ModUpdaterApp {
                                 }
                                 self.status_msg = format!("Iniciando descarga de {} mods en '{}'", count, name);
                                 self.cached_modpacks = list_modpacks();
-                                close_requested = true;
+                                // Don't close — keep window open to show progress
                             }
                         }
                     });
+
+                    // === Download Progress List ===
+                    if !self.active_downloads.is_empty() {
+                        ui.add_space(8.0);
+                        tui_separator(ui);
+                        ui.add_space(4.0);
+                        tui_heading(ui, "PROGRESO");
+                        ui.add_space(4.0);
+
+                        let mut done_count = 0usize;
+                        let mut err_count = 0usize;
+                        let total = self.active_downloads.len();
+
+                        egui::ScrollArea::vertical()
+                            .id_salt("download_progress_scroll")
+                            .max_height(300.0)
+                            .show(ui, |ui| {
+                                for (key, status) in &self.active_downloads {
+                                    ui.horizontal(|ui| {
+                                        let display_name = key.as_str();
+
+                                        match status {
+                                            ModStatus::Resolving => {
+                                                tui_theme::tui_status(ui, "[...]", tui_theme::NEON_YELLOW);
+                                                tui_dim(ui, &display_name);
+                                            },
+                                            ModStatus::Downloading(p) => {
+                                                let pct = format!("[{:>3.0}%]", p * 100.0);
+                                                tui_theme::tui_status(ui, &pct, tui_theme::NEON_YELLOW);
+                                                tui_dim(ui, &display_name);
+                                            },
+                                            ModStatus::Done => {
+                                                done_count += 1;
+                                                tui_theme::tui_status(ui, "[ OK ]", tui_theme::NEON_GREEN);
+                                                tui_dim(ui, &display_name);
+                                            },
+                                            ModStatus::Error(e) => {
+                                                err_count += 1;
+                                                tui_theme::tui_status(ui, "[FAIL]", tui_theme::NEON_RED);
+                                                tui_dim(ui, &display_name);
+                                                ui.label(egui::RichText::new(e)
+                                                    .family(egui::FontFamily::Monospace)
+                                                    .color(tui_theme::NEON_RED)
+                                                    .size(10.0));
+                                            },
+                                            _ => {
+                                                tui_dim(ui, &display_name);
+                                            }
+                                        }
+                                    });
+                                }
+                            });
+
+                        ui.add_space(4.0);
+                        tui_separator(ui);
+                        ui.horizontal(|ui| {
+                            tui_number(ui, &format!("{}/{}", done_count, total));
+                            tui_dim(ui, "completados");
+                            if err_count > 0 {
+                                tui_theme::tui_status(ui, &format!("{} errores", err_count), tui_theme::NEON_RED);
+                            }
+                        });
+
+                        // Clear button when all done
+                        if done_count + err_count == total {
+                            ui.add_space(4.0);
+                            if tui_button_c(ui, "LIMPIAR", tui_theme::NEON_GREEN).clicked() {
+                                self.active_downloads.clear();
+                            }
+                        }
+                    }
                 });
             
             // If window closed via X button or logic request
@@ -1055,9 +1113,8 @@ impl eframe::App for ModUpdaterApp {
             let mut close_requested = false;
 
             egui::Window::new("CREAR PERFIL")
-                .collapsible(false)
+                .collapsible(true)
                 .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .open(&mut open)
                 .show(ctx, |ui| {
                     tui_dim(ui, "Nombre del Perfil:");
@@ -1223,11 +1280,8 @@ impl ModUpdaterApp {
                                             // Check progress by name
                                             if let Some(status) = self.active_downloads.get(&res.name) {
                                                 match status {
-                                                    ModStatus::Downloading(p) => { tui_theme::tui_status(ui, &format!("[{:.0}%]", p * 100.0), tui_theme::NEON_YELLOW); },
-                                                    ModStatus::Resolving => { tui_theme::tui_status(ui, "[...]", tui_theme::NEON_YELLOW); },
                                                     ModStatus::Done => { tui_theme::tui_status(ui, "[OK]", tui_theme::NEON_GREEN); },
-                                                    ModStatus::Error(e) => { tui_theme::tui_status(ui, &format!("[ERR: {}]", e), tui_theme::NEON_RED); },
-                                                    _ => {}
+                                                    _ => { tui_theme::tui_status(ui, "[...]", tui_theme::NEON_YELLOW); },
                                                 }
                                             } else {
                                                 if tui_button_c(ui, "DL", tui_theme::NEON_YELLOW).clicked() {

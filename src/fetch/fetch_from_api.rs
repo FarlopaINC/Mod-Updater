@@ -20,30 +20,26 @@ pub struct ModDownloadInfo {
     pub version_remote: String,
 }
 
-/// Intenta encontrar un mod, primero en Modrinth, y si falla, en CurseForge.
-pub fn find_mod_download(mod_name: &str, mod_id: Option<&str>, game_version: &str, loader: &str, curseforge_api_key: &str) -> Option<ModDownloadInfo> {
-    println!("🔍 Procesando '{}' (ID: {:?}) v{} [{}]...", mod_name, mod_id.unwrap_or("N/A"), game_version, loader);
-    
-    // Helper para verificar y descargar
+/// Intenta resolver un mod en Modrinth (por ID directo, búsqueda por ID, y búsqueda por nombre).
+fn try_modrinth(mod_name: &str, mod_id: Option<&str>, game_version: &str, loader: &str) -> Option<ModDownloadInfo> {
+    // Helper para verificar y extraer info de un hit de Modrinth
     let try_find_version = |hit: &ModrinthSearchHit| -> Option<ModDownloadInfo> {
         if let Some(modrinth_version) = modrinth_api::fetch_modrinth_version(&hit.project_id, game_version, loader) {
             if let Some(file) = modrinth_version.first_file() {
                 println!("✅ Encontrado en Modrinth: {} (Project: {})", file.filename, hit.title);
-                // Convertimos del tipo `ModFile` a nuestro tipo unificado
                 return Some(ModDownloadInfo {
                     filename: file.filename.clone(),
                     url: file.url.clone(),
                     project_id: hit.project_id.clone(),
-                    version_remote: game_version.to_string(), // Or specific version ID if we had it, but game_version is what we matched against or what we requested
+                    version_remote: game_version.to_string(),
                 });
             }
         }
-        return None;
+        None
     };
 
-    // --- 1. Intento por ID (Si existe) ---
+    // 1. Intento por ID directo
     if let Some(id) = mod_id {
-        // OPTIMIZATION: Try to fetch version directly using ID to avoid search overhead
         if let Some(modrinth_version) = modrinth_api::fetch_modrinth_version(id, game_version, loader) {
             if let Some(file) = modrinth_version.first_file() {
                 println!("✅ Encontrado en Modrinth (Directo): {} (ID: {})", file.filename, id);
@@ -56,7 +52,7 @@ pub fn find_mod_download(mod_name: &str, mod_id: Option<&str>, game_version: &st
             }
         }
 
-        // Fallback: search if direct lookup failed
+        // Fallback: búsqueda por slug
         let hits = modrinth_api::search_modrinth_project(id, &None, &None, 0, 5);
         for hit in &hits {
             if hit.slug == id {
@@ -67,7 +63,7 @@ pub fn find_mod_download(mod_name: &str, mod_id: Option<&str>, game_version: &st
         }
     }
 
-    // --- 2. Intento por Nombre (Fallback) ---
+    // 2. Intento por nombre
     let hits = modrinth_api::search_modrinth_project(mod_name, &None, &None, 0, 5);
     for hit in &hits {
         let slug_match = mod_id.map_or(false, |id| hit.slug == id);
@@ -79,10 +75,16 @@ pub fn find_mod_download(mod_name: &str, mod_id: Option<&str>, game_version: &st
             }
         }
     }
-    
-    println!("⚠️ No encontrado en Modrinth. Probando en CurseForge...");
 
-    // --- 3. Intento con CurseForge (Fallback) ---
+    None
+}
+
+/// Intenta resolver un mod en CurseForge (búsqueda por nombre → fichero de versión).
+fn try_curseforge(mod_name: &str, game_version: &str, loader: &str, curseforge_api_key: &str) -> Option<ModDownloadInfo> {
+    if curseforge_api_key.is_empty() {
+        return None;
+    }
+
     if let Some(curseforge_id) = curseforge_api::fetch_curseforge_project_id(mod_name, curseforge_api_key) {
         if let Some(curse_file) = curseforge_api::fetch_curseforge_version_file(curseforge_id, game_version, loader, curseforge_api_key) {
             if let Some(download_url) = curse_file.download_url {
@@ -91,7 +93,7 @@ pub fn find_mod_download(mod_name: &str, mod_id: Option<&str>, game_version: &st
                     filename: curse_file.file_name.clone(),
                     url: download_url,
                     project_id: curseforge_id.to_string(),
-                    version_remote: curse_file.file_name, // CurseForge uses filename often as version indicator or we can track it
+                    version_remote: curse_file.file_name,
                 });
             } else {
                 println!("❌ CurseForge encontró el archivo pero no tiene URL de descarga directa.");
@@ -99,8 +101,40 @@ pub fn find_mod_download(mod_name: &str, mod_id: Option<&str>, game_version: &st
         }
     }
 
+    None
+}
+
+/// Intenta encontrar un mod usando balanceo dinámico entre Modrinth y CurseForge.
+/// Ambas APIs se intentan SIEMPRE antes de reportar error — el balanceo solo cambia el orden.
+pub fn find_mod_download(mod_name: &str, mod_id: Option<&str>, game_version: &str, loader: &str, curseforge_api_key: &str) -> Option<ModDownloadInfo> {
+    println!("🔍 Procesando '{}' (ID: {:?}) v{} [{}]...", mod_name, mod_id.unwrap_or("N/A"), game_version, loader);
+
+    // Decidir orden según capacidad disponible
+    let modrinth_first = modrinth_api::has_capacity() || !curseforge_api::is_available();
+
+    if modrinth_first {
+        // Orden normal: Modrinth → CurseForge
+        if let Some(info) = try_modrinth(mod_name, mod_id, game_version, loader) {
+            return Some(info);
+        }
+        println!("⚠️ No encontrado en Modrinth. Probando en CurseForge...");
+        if let Some(info) = try_curseforge(mod_name, game_version, loader, curseforge_api_key) {
+            return Some(info);
+        }
+    } else {
+        // Swap: CurseForge primero (Modrinth agotado)
+        println!("🔄 Modrinth rate limit bajo, priorizando CurseForge...");
+        if let Some(info) = try_curseforge(mod_name, game_version, loader, curseforge_api_key) {
+            return Some(info);
+        }
+        println!("⚠️ No encontrado en CurseForge. Probando en Modrinth...");
+        if let Some(info) = try_modrinth(mod_name, mod_id, game_version, loader) {
+            return Some(info);
+        }
+    }
+
     println!("❌ No se encontró '{}' en ninguna plataforma.", mod_name);
-    return None;
+    None
 }
 
 pub fn download_mod_file(file_url: &str, output_folder: &str, filename: &str) -> Result<(), std::io::Error> {

@@ -41,9 +41,16 @@ pub fn spawn_workers(n: usize, rx: Receiver<DownloadJob>, tx_events: Sender<Down
                 // Get CurseForge API key from env if present (optional)
                 let cf_key = env::var("CURSEFORGE_API_KEY").unwrap_or_default();
 
-                let mod_id_candidate = mi.confirmed_project_id.as_deref().or(mi.detected_project_id.as_deref());
+                // Resolver el ID del proyecto: confirmed > cache lookup > detected
+                let resolved_id: Option<String> = mi.confirmed_project_id.clone()
+                    .or_else(|| {
+                        // Cache miss por filename — buscar en tabla PROJECTS directamente
+                        mi.detected_project_id.as_deref()
+                            .and_then(crate::manage_mods::cache::get_confirmed_id)
+                    })
+                    .or(mi.detected_project_id.clone());
 
-                match fetch_from_api::find_mod_download(&mi.name, mod_id_candidate, &job.selected_version, &job.selected_loader, &cf_key) {
+                match fetch_from_api::find_mod_download(&mi.name, resolved_id.as_deref(), &job.selected_version, &job.selected_loader, &cf_key) {
                      Some(info) => {
                         let confirmed_project_id = Some(info.project_id.clone());
                         let version_remote = Some(info.version_remote.clone());

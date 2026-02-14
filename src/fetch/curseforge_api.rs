@@ -82,6 +82,21 @@ static RATE_LIMIT: Lazy<Mutex<TokenBucket>> = Lazy::new(|| {
     Mutex::new(TokenBucket::new(150.0)) // 150 req/min conservador
 });
 
+/// Consulta si CurseForge tiene capacidad de rate limit disponible (sin consumir tokens).
+pub fn has_capacity() -> bool {
+    if let Ok(mut bucket) = RATE_LIMIT.lock() {
+        bucket.refill();
+        bucket.tokens >= 1.0
+    } else {
+        true
+    }
+}
+
+/// Comprueba si CurseForge está disponible (API key configurada + capacidad).
+pub fn is_available() -> bool {
+    std::env::var("CURSEFORGE_API_KEY").is_ok_and(|k| !k.is_empty()) && has_capacity()
+}
+
 fn wait_for_ratelimit() {
     loop {
         let wait = RATE_LIMIT.lock().unwrap().try_acquire();

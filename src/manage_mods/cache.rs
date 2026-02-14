@@ -178,6 +178,17 @@ pub fn update_remote_info(filename: &str, project_id: Option<String>, version_re
     let _ = write_txn.commit();
 }
 
+/// Busca el confirmed_project_id directamente en la tabla PROJECTS por detected_project_id.
+/// Esto evita depender del filename (que cambia entre versiones del mod).
+pub fn get_confirmed_id(detected_id: &str) -> Option<String> {
+    let db = db()?;
+    let read_txn = db.begin_read().ok()?;
+    let table = read_txn.open_table(TABLE_PROJECTS).ok()?;
+    let access = table.get(detected_id).ok()??;
+    let proj: CachedProject = serde_json::from_str(access.value()).ok()?;
+    proj.confirmed_project_id
+}
+
 pub fn prune_db(valid_filenames: &std::collections::HashSet<String>) -> usize {
     let Some(db) = db() else { return 0 };
     let Ok(write_txn) = db.begin_write() else { return 0 };

@@ -88,14 +88,23 @@ fn update_ratelimit(headers: &HeaderMap) {
 
 // ── Client ───────────────────────────────────────────────────
 
-fn build_modrinth_client() -> Client {
+static MODRINTH_CLIENT: Lazy<Client> = Lazy::new(|| {
     Client::builder().user_agent("ModsUpdater/1.0 (github.com/FarlopaINC)").build().unwrap()
+});
+
+/// Consulta si Modrinth tiene capacidad de rate limit disponible (sin esperar).
+pub fn has_capacity() -> bool {
+    if let Ok(state) = RATE_LIMIT.lock() {
+        state.remaining > 10 || Instant::now() >= state.reset_at
+    } else {
+        true // Si no podemos leer el mutex, asumir que sí hay capacidad
+    }
 }
 
 // ── API Functions ────────────────────────────────────────────
 
 pub fn search_modrinth_project(query: &str, loader: &Option<String>, version: &Option<String>, offset: u32, limit: u32) -> Vec<ModrinthSearchHit> {
-    let client = build_modrinth_client();
+    let client = &*MODRINTH_CLIENT;
     let search_url = "https://api.modrinth.com/v2/search";
     
     let mut facets = Vec::new();
@@ -149,7 +158,7 @@ pub fn search_modrinth_project(query: &str, loader: &Option<String>, version: &O
 }
 
 pub fn fetch_modrinth_version(mod_id: &str, version: &str, loader: &str) -> Option<ModrinthVersion> {
-    let client = build_modrinth_client();
+    let client = &*MODRINTH_CLIENT;
     let api_url = format!("https://api.modrinth.com/v2/project/{}/version", mod_id);
 
     // Prepare query parameters for filtering

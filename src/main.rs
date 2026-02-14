@@ -5,7 +5,9 @@ use mods_updater::ui::app::ModUpdaterApp;
 
 fn main() {
     // Inicializar DB (Redb)
-    mods_updater::manage_mods::cache::init();
+    if !mods_updater::manage_mods::cache::init() {
+        eprintln!("⚠️ Caché deshabilitada: la app funcionará sin caché (más lento).");
+    }
 
     // Limpiar descargas parciales (.part) en hilo separado
     std::thread::spawn(|| {

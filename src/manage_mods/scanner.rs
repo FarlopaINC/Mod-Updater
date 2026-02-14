@@ -36,11 +36,12 @@ pub fn read_mods_in_folder(mods_folder: &str) -> IndexMap<String, ModInfo> {
                 };
 
                 // Check Cache (Redb)
+                let cached = crate::manage_mods::cache::get_mod(&filename);
                 let mut use_cache = false;
-                if let Some(cached) = crate::manage_mods::cache::get_mod(&filename) {
+                if let Some(ref c) = cached {
                      // Verify integrity
-                    if cached.file_size_bytes == Some(file_size) && cached.file_mtime_secs == Some(file_mtime) {
-                        mods_map.insert(cached.key.clone(), cached.clone());
+                    if c.file_size_bytes == Some(file_size) && c.file_mtime_secs == Some(file_mtime) {
+                        mods_map.insert(c.key.clone(), c.clone());
                         use_cache = true;
                     }
                 }
@@ -51,8 +52,8 @@ pub fn read_mods_in_folder(mods_folder: &str) -> IndexMap<String, ModInfo> {
                         mod_info.file_size_bytes = Some(file_size);
                         mod_info.file_mtime_secs = Some(file_mtime);
                         
-                        // If previous cache had useful remote info, preserve it if key matches
-                        if let Some(old) = crate::manage_mods::cache::get_mod(&filename) {
+                        // Reusar la lectura anterior para preservar info remota
+                        if let Some(old) = &cached {
                             if old.key == mod_info.key {
                                 mod_info.confirmed_project_id = old.confirmed_project_id.clone();
                                 mod_info.version_remote = old.version_remote.clone();
@@ -152,16 +153,16 @@ pub fn list_modpacks() -> Vec<String> {
         return vec![];
     }
 
-    let entries = fs::read_dir(modpacks_folder)
-        .unwrap()
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_type().unwrap().is_dir())
-        .map(|entry| entry.file_name().to_string_lossy().to_string())
-        .collect::<Vec<_>>();
+    let mut entries: Vec<String> = fs::read_dir(modpacks_folder)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
 
-    let mut sorted = entries;
-    sorted.sort();
-    return sorted;
+    entries.sort();
+    entries
 }
 
 

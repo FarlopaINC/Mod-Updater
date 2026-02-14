@@ -44,7 +44,6 @@ impl TroubleshootMemory {
 }
 
 // Persistencia
-// Persistencia
 fn memory_path() -> Option<PathBuf> {
     use crate::paths_vars::PATHS;
     let dir = &PATHS.modpacks_folder;
@@ -70,7 +69,10 @@ pub fn load_memory() -> TroubleshootMemory {
 pub fn save_memory(mem: &TroubleshootMemory) {
     if let Some(path) = memory_path() {
         if let Ok(data) = serde_json::to_string_pretty(mem) {
-            let _ = fs::write(path, data);
+            let tmp = path.with_extension("json.tmp");
+            if fs::write(&tmp, &data).is_ok() {
+                let _ = fs::rename(&tmp, &path);
+            }
         }
     }
 }

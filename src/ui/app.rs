@@ -141,7 +141,8 @@ pub struct ModUpdaterApp {
     pub create_profile_modal_name: Option<String>,
     
     // --- Modpacks State ---
-    pub active_modpack: Option<String>, 
+    pub active_modpack: Option<String>,
+    pub cached_modpacks: Vec<String>,
     
     // --- Global Download State ---
     pub active_downloads: HashMap<String, ModStatus>,
@@ -175,7 +176,7 @@ impl ModUpdaterApp {
         let (tx_read_jobs, rx_read_jobs) = unbounded();
         let (tx_read_events, rx_read_events) = unbounded();
 
-        // If we have an active modpack, scan it and load/queue mods
+        // If we have an active modpack, scan it with cache check
         if let Some(ref pack_name) = active_modpack {
             let pack_folder = PATHS.modpacks_folder.join(pack_name);
             if let Ok(entries) = std::fs::read_dir(&pack_folder) {
@@ -186,25 +187,18 @@ impl ModUpdaterApp {
                     let path = entry.path();
                     if path.extension().and_then(|s| s.to_str()) == Some("jar") {
                         let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-                        
-                        // Get minimal metadata for cache verification
                         let (file_size, file_mtime) = if let Ok(meta) = std::fs::metadata(&path) {
                             (meta.len(), crate::manage_mods::scanner::get_file_mtime(&meta))
-                        } else {
-                            (0, 0)
-                        };
+                        } else { (0, 0) };
 
-                        // Check Cache
-                        let mut loaded_from_cache = false;
+                        let mut loaded = false;
                         if let Some(cached) = crate::manage_mods::cache::get_mod(&filename) {
                             if cached.file_size_bytes == Some(file_size) && cached.file_mtime_secs == Some(file_mtime) {
                                 ui_mods.insert(cached.key.clone(), UiModInfo::from(cached));
-                                loaded_from_cache = true;
+                                loaded = true;
                             }
                         }
-
-                        if !loaded_from_cache {
-                            // Queue for async reading
+                        if !loaded {
                             let _ = tx_read_jobs.send(ReadJob { file_path: path });
                         }
                     }
@@ -270,6 +264,8 @@ impl ModUpdaterApp {
 
             selected_modpack_ui: active_modpack,
 
+            cached_modpacks: list_modpacks(),
+
             loaders: vec![
                 "Fabric".to_string(), 
                 "Forge".to_string(), 
@@ -294,6 +290,32 @@ impl ModUpdaterApp {
         };
     }
 
+    /// Carga mods de una carpeta: intenta caché primero, si no, crea placeholder y envía ReadJob.
+    fn load_mods_from_folder(&mut self, folder: &std::path::Path) {
+        self.mods.clear();
+        if let Ok(entries) = std::fs::read_dir(folder) {
+            let mut entries_vec: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+            entries_vec.sort_by_key(|e| e.file_name());
+
+            for entry in entries_vec {
+                let path = entry.path();
+                if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("jar") {
+                    let key = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    let placeholder = ModInfo {
+                        key: key.clone(), name: key.clone(),
+                        detected_project_id: None, confirmed_project_id: None,
+                        version_local: None, version_remote: None, selected: true,
+                        file_size_bytes: None, file_mtime_secs: None, depends: None,
+                    };
+                    self.mods.insert(key, UiModInfo {
+                        inner: placeholder, status: ModStatus::Resolving, progress: 0.0,
+                    });
+                    let _ = self.tx_read_jobs.send(ReadJob { file_path: path });
+                }
+            }
+        }
+    }
+
     fn render_explorer_side(&mut self, ctx: &egui::Context) {
         SidePanel::right("selector_modpacks")
         .resizable(true)
@@ -302,7 +324,7 @@ impl ModUpdaterApp {
             ui.add_space(6.0);  
             ui.heading("MODPACKS");
             ui.add_space(6.0);
-            let modpacks = list_modpacks();
+            let modpacks = self.cached_modpacks.clone();
 
             if modpacks.is_empty() {
                 ui.label("No hay modpacks disponibles");
@@ -357,34 +379,8 @@ impl ModUpdaterApp {
                                             PATHS.modpacks_folder.join(&mp)
                                         };
 
-                                        // Async Load Logic
-                                        self.mods.clear();
-                                        if let Ok(entries) = std::fs::read_dir(&target_folder) {
-                                            let mut entries_vec: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-                                            entries_vec.sort_by_key(|e| e.file_name());
-
-                                            for entry in entries_vec {
-                                                let path = entry.path();
-                                                if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("jar") {
-                                                    let key = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-                                                    // Placeholder
-                                                    let placeholder = ModInfo {
-                                                        key: key.clone(),
-                                                        name: key.clone(),
-                                                        detected_project_id: None, confirmed_project_id: None,
-                                                        version_local: None, version_remote: None, selected: true,
-                                                        file_size_bytes: None, file_mtime_secs: None,
-                                                        depends: None,
-                                                    };
-                                                    self.mods.insert(key.clone(), UiModInfo {
-                                                        inner: placeholder,
-                                                        status: ModStatus::Resolving,
-                                                        progress: 0.0,
-                                                    });
-                                                    let _ = self.tx_read_jobs.send(ReadJob { file_path: path });
-                                                }
-                                            }
-                                        }
+                                        // Usar método helper
+                                        self.load_mods_from_folder(&target_folder);
                                     }
                                 });
                             });
@@ -424,34 +420,8 @@ impl ModUpdaterApp {
                         PATHS.mods_folder.clone()
                     };
                     
-                    // Async Load Logic
-                    self.mods.clear();
-                    if let Ok(entries) = std::fs::read_dir(&folder) {
-                        let mut entries_vec: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-                        entries_vec.sort_by_key(|e| e.file_name());
-
-                        for entry in entries_vec {
-                            let path = entry.path();
-                            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("jar") {
-                                let key = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-                                    // Placeholder
-                                    let placeholder = ModInfo {
-                                        key: key.clone(),
-                                        name: key.clone(),
-                                        detected_project_id: None, confirmed_project_id: None,
-                                        version_local: None, version_remote: None, selected: true,
-                                        file_size_bytes: None, file_mtime_secs: None,
-                                        depends: None,
-                                    };
-                                    self.mods.insert(key.clone(), UiModInfo {
-                                        inner: placeholder,
-                                    status: ModStatus::Resolving,
-                                    progress: 0.0,
-                                });
-                                let _ = self.tx_read_jobs.send(ReadJob { file_path: path });
-                            }
-                        }
-                    }
+                    // Usar método helper
+                    self.load_mods_from_folder(&folder);
                     self.status_msg = "Actualizando lista de mods...".to_string();
             }
 
@@ -904,6 +874,7 @@ impl eframe::App for ModUpdaterApp {
                                     let target = PATHS.modpacks_folder.join(&name);
                                     if std::fs::remove_dir_all(&target).is_ok() {
                                         self.status_msg = format!("Modpack '{}' eliminado.", name);
+                                        self.cached_modpacks = list_modpacks();
                                     }
                                 }
                                 DeletionConfirmation::SelectedMods => {
@@ -1052,6 +1023,7 @@ impl eframe::App for ModUpdaterApp {
                                     }
                                 }
                                 self.status_msg = format!("Iniciando descarga de {} mods en '{}'", count, name);
+                                self.cached_modpacks = list_modpacks();
                                 close_requested = true;
                             }
                         }

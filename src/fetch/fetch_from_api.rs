@@ -1,8 +1,16 @@
-use reqwest::blocking::get;
+use reqwest::blocking::Client;
 use std::path::Path;
+use once_cell::sync::Lazy;
 use super::modrinth_api;
 use super::curseforge_api;
 use super::modrinth_api::ModrinthSearchHit;
+
+static DOWNLOAD_CLIENT: Lazy<Client> = Lazy::new(|| {
+    Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .unwrap_or_default()
+});
 
 #[derive(Debug, Clone)]
 pub struct ModDownloadInfo {
@@ -96,7 +104,8 @@ pub fn find_mod_download(mod_name: &str, mod_id: Option<&str>, game_version: &st
 }
 
 pub fn download_mod_file(file_url: &str, output_folder: &str, filename: &str) -> Result<(), std::io::Error> {
-    let mut resp_file = get(file_url).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+    let mut resp_file = DOWNLOAD_CLIENT.get(file_url).send()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
     let dest_path = Path::new(output_folder).join(filename);
     let part_path = Path::new(output_folder).join(format!("{}.part", filename));

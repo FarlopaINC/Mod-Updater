@@ -83,7 +83,10 @@ pub fn load_profiles() -> ProfilesDatabase {
 pub fn save_profiles(db: &ProfilesDatabase) {
     if let Some(path) = profiles_path() {
         if let Ok(data) = serde_json::to_string_pretty(db) {
-            let _ = fs::write(path, data);
+            let tmp = path.with_extension("json.tmp");
+            if fs::write(&tmp, &data).is_ok() {
+                let _ = fs::rename(&tmp, &path);
+            }
         }
     }
 }

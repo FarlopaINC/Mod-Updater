@@ -1,6 +1,9 @@
 use reqwest::blocking::Client;
 use reqwest::header;
 use serde::Deserialize;
+use std::sync::Mutex;
+use std::time::Instant;
+use once_cell::sync::Lazy;
 
 #[derive(Debug, Deserialize)]
 struct ApiResponse<T> {
@@ -38,6 +41,62 @@ pub struct CurseFile {
     pub mod_loaders: Vec<String>,
 }
 
+// ── Rate Limiting (Token Bucket) ─────────────────────────────
+
+struct TokenBucket {
+    tokens: f64,
+    max_tokens: f64,
+    refill_rate: f64, // tokens por segundo
+    last_refill: Instant,
+}
+
+impl TokenBucket {
+    fn new(max_per_minute: f64) -> Self {
+        Self {
+            tokens: max_per_minute,
+            max_tokens: max_per_minute,
+            refill_rate: max_per_minute / 60.0,
+            last_refill: Instant::now(),
+        }
+    }
+
+    fn refill(&mut self) {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
+        self.tokens = (self.tokens + elapsed * self.refill_rate).min(self.max_tokens);
+        self.last_refill = now;
+    }
+
+    fn try_acquire(&mut self) -> Option<f64> {
+        self.refill();
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            None // Éxito, no hay que esperar
+        } else {
+            Some((1.0 - self.tokens) / self.refill_rate) // Segundos a esperar
+        }
+    }
+}
+
+static RATE_LIMIT: Lazy<Mutex<TokenBucket>> = Lazy::new(|| {
+    Mutex::new(TokenBucket::new(150.0)) // 150 req/min conservador
+});
+
+fn wait_for_ratelimit() {
+    loop {
+        let wait = RATE_LIMIT.lock().unwrap().try_acquire();
+        match wait {
+            None => return, // Token adquirido
+            Some(secs) => {
+                println!("⏳ CurseForge rate limit: esperando {:.1}s...", secs);
+                std::thread::sleep(std::time::Duration::from_secs_f64(secs));
+            }
+        }
+    }
+}
+
+// ── Client ───────────────────────────────────────────────────
+
 fn build_curse_client(api_key: &str) -> Client {
     let mut headers = header::HeaderMap::new();
     headers.insert("x-api-key", header::HeaderValue::from_str(api_key).unwrap());
@@ -46,6 +105,8 @@ fn build_curse_client(api_key: &str) -> Client {
         .build()
         .unwrap()
 }
+
+// ── API Functions ────────────────────────────────────────────
 
 pub fn search_curseforge(query: &str, api_key: &str, loader: &Option<String>, version: &Option<String>, offset: u32, limit: u32) -> Vec<CurseMod> {
     let client = build_curse_client(api_key);
@@ -90,6 +151,8 @@ pub fn search_curseforge(query: &str, api_key: &str, loader: &Option<String>, ve
         params.push(("modLoaderType", lid));
     }
 
+    wait_for_ratelimit();
+
     match client.get(search_url).query(&params).send() {
         Ok(resp) => {
             if resp.status().is_success() {
@@ -133,6 +196,8 @@ pub fn fetch_curseforge_version_file(mod_id: u32, game_version: &str, loader: &s
         ("modLoaderType", loader_type)
     ];
 
+    wait_for_ratelimit();
+
     match client.get(&api_url).query(&params).send() {
         Ok(resp) => {
             if resp.status().is_success() {
@@ -153,3 +218,4 @@ pub fn fetch_curseforge_version_file(mod_id: u32, game_version: &str, loader: &s
         }
     }
 }
+

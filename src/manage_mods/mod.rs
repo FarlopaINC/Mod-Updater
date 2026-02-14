@@ -4,6 +4,7 @@ pub mod fs_ops;
 pub mod profiles;
 pub mod memory;
 pub mod async_reader;
+pub mod cache;
 
 pub use models::*;
 pub use scanner::*;

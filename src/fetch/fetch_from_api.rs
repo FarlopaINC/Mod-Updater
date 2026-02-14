@@ -35,6 +35,20 @@ pub fn find_mod_download(mod_name: &str, mod_id: Option<&str>, game_version: &st
 
     // --- 1. Intento por ID (Si existe) ---
     if let Some(id) = mod_id {
+        // OPTIMIZATION: Try to fetch version directly using ID to avoid search overhead
+        if let Some(modrinth_version) = modrinth_api::fetch_modrinth_version(id, game_version, loader) {
+            if let Some(file) = modrinth_version.first_file() {
+                println!("✅ Encontrado en Modrinth (Directo): {} (ID: {})", file.filename, id);
+                return Some(ModDownloadInfo {
+                    filename: file.filename.clone(),
+                    url: file.url.clone(),
+                    project_id: id.to_string(),
+                    version_remote: game_version.to_string(),
+                });
+            }
+        }
+
+        // Fallback: search if direct lookup failed
         let hits = modrinth_api::search_modrinth_project(id, &None, &None, 0, 5);
         for hit in &hits {
             if hit.slug == id {
@@ -83,14 +97,32 @@ pub fn find_mod_download(mod_name: &str, mod_id: Option<&str>, game_version: &st
 
 pub fn download_mod_file(file_url: &str, output_folder: &str, filename: &str) -> Result<(), std::io::Error> {
     let mut resp_file = get(file_url).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-    // Use Windows-friendly separators; ensure output folder exists
-    let dest_path = format!("{}\\{}", output_folder, filename);
-    if let Some(parent) = Path::new(&dest_path).parent() {
+
+    let dest_path = Path::new(output_folder).join(filename);
+    let part_path = Path::new(output_folder).join(format!("{}.part", filename));
+
+    if let Some(parent) = dest_path.parent() {
         if !parent.exists() {
             std::fs::create_dir_all(parent)?;
         }
     }
-    let mut out_file = std::fs::File::create(&dest_path)?;
-    std::io::copy(&mut resp_file, &mut out_file)?;
-    Ok(())
+
+    // Descargar a archivo temporal .part
+    let result = {
+        let mut out_file = std::fs::File::create(&part_path)?;
+        std::io::copy(&mut resp_file, &mut out_file)
+    };
+
+    match result {
+        Ok(_) => {
+            // Descarga completa: renombrar .part -> archivo final
+            std::fs::rename(&part_path, &dest_path)?;
+            Ok(())
+        }
+        Err(e) => {
+            // Fallo: eliminar el .part corrupto
+            let _ = std::fs::remove_file(&part_path);
+            Err(e)
+        }
+    }
 }

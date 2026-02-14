@@ -24,6 +24,10 @@ pub fn spawn_read_workers(n: usize, rx: Receiver<ReadJob>, tx: Sender<ReadEvent>
             while let Ok(job) = rx.recv() {
                 match read_single_mod(&job.file_path) {
                     Ok(info) => {
+                        // Persist to cache (Background thread, safe to block)
+                        // Key should match filename
+                        let filename = job.file_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                        crate::manage_mods::cache::upsert_mod(&filename, &info);
                         let _ = tx.send(ReadEvent::Done { info });
                     }
                     Err(e) => {

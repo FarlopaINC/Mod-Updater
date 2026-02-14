@@ -1,31 +1,22 @@
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
 use mods_updater::ui::app::ModUpdaterApp;
-use mods_updater::manage_mods::{read_mods_in_folder, save_cache, load_cache};
-use mods_updater::paths_vars::PATHS;
+
 
 fn main() {
-    // Leemos los mods detectados en carpeta
-    let mut detected = read_mods_in_folder(&PATHS.mods_folder.to_string_lossy().to_string());
+    // Inicializar DB (Redb)
+    mods_updater::manage_mods::cache::init();
 
-    // Cargamos cache y fusionamos confirmed_project_id si existe
-    let cache = load_cache();
-    for (k, v) in cache {
-        if let Some(entry) = detected.get_mut(&k) {
-            if entry.confirmed_project_id.is_none() {
-                entry.confirmed_project_id = v.confirmed_project_id.clone();
-            }
-        }
-    }
-
-    // Guardamos la cache actualizada
-    save_cache(&detected);
+    // Limpiar descargas parciales (.part) en hilo separado
+    std::thread::spawn(|| {
+        mods_updater::manage_mods::fs_ops::cleanup_partial_downloads();
+    });
 
     let options = eframe::NativeOptions::default();
     let _ = eframe::run_native(
         "Mods Updater",
         options,
-        Box::new(|_cc| Ok(Box::new(ModUpdaterApp::new(detected)))),
+        Box::new(|cc| Ok(Box::new(ModUpdaterApp::new(cc)))),
     );
 }
  

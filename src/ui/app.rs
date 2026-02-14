@@ -9,7 +9,7 @@ use indexmap::IndexMap;
 use crate::manage_mods::{
     change_mods, list_modpacks, get_minecraft_versions, read_active_marker,
     spawn_read_workers, ReadJob, ReadEvent,
-    ModInfo, ProfilesDatabase, TroubleshootMemory, load_profiles, save_profiles, load_memory, Profile 
+    ModInfo, ProfilesDatabase, TroubleshootMemory, load_profiles, save_profiles, load_memory, Profile,
 };
 use crate::fetch::async_download::{spawn_workers, DownloadJob, DownloadEvent};
 use crate::fetch::single_mod_search::{UnifiedSearchResult, search_unified, SearchRequest};
@@ -140,6 +140,9 @@ pub struct ModUpdaterApp {
     // --- Create Profile Dialog State ---
     pub create_profile_modal_name: Option<String>,
     
+    // --- Modpacks State ---
+    pub active_modpack: Option<String>, 
+    
     // --- Global Download State ---
     pub active_downloads: HashMap<String, ModStatus>,
 
@@ -150,7 +153,10 @@ pub struct ModUpdaterApp {
 }
 
 impl ModUpdaterApp {
-    pub fn new(mods: IndexMap<String, ModInfo>) -> Self {
+    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        // Detect active modpack first to use in logic
+        let active_modpack = crate::manage_mods::fs_ops::read_active_marker();
+
         let mc_versions = get_minecraft_versions(&PATHS.versions_folder
             .join("version_manifest_V2.json")
             .to_string_lossy()
@@ -158,38 +164,60 @@ impl ModUpdaterApp {
         );
         let selected_mc_version = mc_versions.get(0).cloned().unwrap_or_else(|| "1.20.2".to_string());
         
-        // Merge with cache (if present) so we keep confirmed IDs / remote version info
-        let cache = crate::manage_mods::load_cache();
+        // Initial empty state
         let mut ui_mods: IndexMap<String, UiModInfo> = IndexMap::new();
-        for (k, v) in mods.into_iter() {
-            if let Some(cached) = cache.get(&k) {
-                let mut merged = cached.clone();
-                // preserve current selection state from detected folder
-                merged.selected = v.selected;
-                ui_mods.insert(k.clone(), UiModInfo::from(merged));
-            } else {
-                ui_mods.insert(k.clone(), UiModInfo::from(v));
-            }
-        }
-
+        
         // create channels
         let (tx_jobs, rx_jobs) = unbounded();
         let (tx_events, rx_events) = unbounded();
 
-        // Compute worker count using shared utility
+        // Create async read channels EARLY so we can use them
+        let (tx_read_jobs, rx_read_jobs) = unbounded();
+        let (tx_read_events, rx_read_events) = unbounded();
+
+        // If we have an active modpack, scan it and load/queue mods
+        if let Some(ref pack_name) = active_modpack {
+            let pack_folder = PATHS.modpacks_folder.join(pack_name);
+            if let Ok(entries) = std::fs::read_dir(&pack_folder) {
+                let mut entries_vec: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+                entries_vec.sort_by_key(|e| e.file_name());
+
+                for entry in entries_vec {
+                    let path = entry.path();
+                    if path.extension().and_then(|s| s.to_str()) == Some("jar") {
+                        let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                        
+                        // Get minimal metadata for cache verification
+                        let (file_size, file_mtime) = if let Ok(meta) = std::fs::metadata(&path) {
+                            (meta.len(), crate::manage_mods::scanner::get_file_mtime(&meta))
+                        } else {
+                            (0, 0)
+                        };
+
+                        // Check Cache
+                        let mut loaded_from_cache = false;
+                        if let Some(cached) = crate::manage_mods::cache::get_mod(&filename) {
+                            if cached.file_size_bytes == Some(file_size) && cached.file_mtime_secs == Some(file_mtime) {
+                                ui_mods.insert(cached.key.clone(), UiModInfo::from(cached));
+                                loaded_from_cache = true;
+                            }
+                        }
+
+                        if !loaded_from_cache {
+                            // Queue for async reading
+                            let _ = tx_read_jobs.send(ReadJob { file_path: path });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Compute worker count
         let mods_count = ui_mods.len();
-        let workers = crate::ui::utils::calculate_worker_count(mods_count);
+        let workers = crate::ui::utils::calculate_worker_count(20.max(mods_count));
 
         spawn_workers(workers, rx_jobs, tx_events);
 
-        // persist any new entries in cache (optional)
-        let mut map_for_save: IndexMap<String, ModInfo> = IndexMap::new();
-        for (k, v) in &ui_mods { map_for_save.insert(k.clone(), v.inner.clone()); }
-        crate::manage_mods::save_cache(&map_for_save);
-
-        // Create async read channels
-        let (tx_read_jobs, rx_read_jobs) = unbounded();
-        let (tx_read_events, rx_read_events) = unbounded();
         // Spawn read workers
         spawn_read_workers(workers, rx_read_jobs, tx_read_events.clone());
 
@@ -213,6 +241,13 @@ impl ModUpdaterApp {
         let profiles_db = load_profiles();
         let memory = load_memory();
 
+        // --- Background Cache Cleanup ---
+        thread::spawn(|| {
+            // Wait a bit to let the app load critical stuff first
+            thread::sleep(std::time::Duration::from_secs(5));
+            crate::manage_mods::cache::clean_cache();
+        });
+
         return Self { 
             mods: ui_mods, 
             mc_versions, 
@@ -222,6 +257,9 @@ impl ModUpdaterApp {
             tx_read_jobs,
             rx_read_events, 
             deletion_confirmation: DeletionConfirmation::None, 
+            
+            // Fix: Add active_modpack explicitly
+            active_modpack: active_modpack.clone(), 
 
             status_msg: String::new(),
             current_tab: AppTab::Explorer,
@@ -230,17 +268,15 @@ impl ModUpdaterApp {
             selected_profile_name: None,
             profile_mods_pending_deletion: HashSet::new(),
 
+            selected_modpack_ui: active_modpack,
+
             loaders: vec![
                 "Fabric".to_string(), 
                 "Forge".to_string(), 
                 "NeoForge".to_string(),
                 "Quilt".to_string(),
-                "Any".to_string(),
-                "Cauldron".to_string(),
-                "LiteLoader".to_string()
             ],
             selected_loader: "Fabric".to_string(),
-            selected_modpack_ui: None,
 
             download_confirmation_name: None,
             download_source: DownloadSource::Explorer,
@@ -525,7 +561,36 @@ impl ModUpdaterApp {
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             match &m.status {
-                                ModStatus::Idle => {},
+                                ModStatus::Idle => {
+                                    // Check if we are viewing the active modpack to show Toggle Link
+                                    if let Some(active) = &self.active_modpack {
+                                        if let Some(selected) = &self.selected_modpack_ui {
+                                            if active == selected {
+                                                // Check if linked (exists in /mods)
+                                                // We can check efficiently or assume state?
+                                                // Let's check existence for now.
+                                                let link_path = crate::paths_vars::PATHS.mods_folder.join(&m.inner.key);
+                                                let is_linked = link_path.exists();
+
+                                                if is_linked {
+                                                    if ui.button("🔌").on_hover_text("Desactivar (Desvincular)").clicked() {
+                                                        // Unlink
+                                                        let _ = std::fs::remove_file(&link_path);
+                                                    }
+                                                } else {
+                                                     if ui.button("⚪").on_hover_text("Activar (Vincular)").clicked() {
+                                                        // Link
+                                                        let source_path = crate::paths_vars::PATHS.modpacks_folder.join(selected).join(&m.inner.key);
+                                                        // Try hardlink
+                                                        if std::fs::hard_link(&source_path, &link_path).is_err() {
+                                                            // error handling?
+                                                        }
+                                                     }
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
                                 ModStatus::Resolving => { ui.label("⌛"); },
                                 ModStatus::Downloading(p) => { ui.label(format!("📥 {:.0}%", p * 100.0)); },
                                 ModStatus::Done => { ui.label("✅"); },
@@ -708,16 +773,12 @@ impl eframe::App for ModUpdaterApp {
         // --- Top Bar (Tabs) ---
         TopBottomPanel::top("top_tabs").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if ui.selectable_label(self.current_tab == AppTab::Explorer, "📂 Explorador & Descargas").clicked() {
+                if ui.selectable_label(self.current_tab == AppTab::Explorer, "📂 Mods").clicked() {
                     self.current_tab = AppTab::Explorer;
                 }
                 if ui.selectable_label(self.current_tab == AppTab::Profiles, "👥 Perfiles").clicked() {
                     self.current_tab = AppTab::Profiles;
                 }
-                
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |_ui| {
-                     // Removed Search Button from here
-                });
             });
         });
 
@@ -767,10 +828,8 @@ impl eframe::App for ModUpdaterApp {
                     if let Some(m) = self.mods.get_mut(&key) {
                         m.inner.confirmed_project_id = confirmed_project_id.clone();
                         m.inner.version_remote = version_remote.clone();
-                        // Save cache
-                        let mut map_for_save: IndexMap<String, crate::manage_mods::ModInfo> = IndexMap::new();
-                        for (k, v) in &self.mods { map_for_save.insert(k.clone(), v.inner.clone()); }
-                        crate::manage_mods::save_cache(&map_for_save);
+                        // Save cache (Redb Update)
+                        crate::manage_mods::cache::update_remote_info(&key, confirmed_project_id, version_remote);
                     }
                 }
                 DownloadEvent::Done { key } => {
@@ -788,14 +847,14 @@ impl eframe::App for ModUpdaterApp {
         for ev in self.rx_read_events.try_iter() {
             match ev {
                 ReadEvent::Done { info } => {
-                    // Update entry. The key should match what we created (filename).
-                    // Or if we used mod name as key, we might need to map it. 
-                    // But we decided key = filename for now in placeholders.
                     let key = info.key.clone();
-                    // We might need to replace the placeholder
                     if let Some(placeholder) = self.mods.get_mut(&key) {
                         placeholder.inner = info;
                         placeholder.status = ModStatus::Idle;
+                    } else {
+                        // Edge case: Mod wasn't in placeholder (maybe new file appeared?)
+                        // Insert it now
+                        self.mods.insert(key, UiModInfo::from(info));
                     }
                 }
                 ReadEvent::Error { path, msg } => {
@@ -817,10 +876,21 @@ impl eframe::App for ModUpdaterApp {
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .show(ctx, |ui| {
                     match &self.deletion_confirmation {
-                        DeletionConfirmation::Modpack(name) => ui.label(format!("¿Borrar modpack '{}' de disco?", name)),
-                        DeletionConfirmation::SelectedMods => ui.label("¿Borrar mods seleccionados de disco?"),
-                        DeletionConfirmation::Profile(name) => ui.label(format!("¿Borrar perfil lógico '{}'? (No borra archivos)", name)),
-                        DeletionConfirmation::None => ui.label(""),
+                        DeletionConfirmation::Modpack(name) => { ui.label(format!("¿Borrar modpack '{}' de disco?", name)); },
+                        DeletionConfirmation::SelectedMods => {
+                             if let Some(mp) = &self.selected_modpack_ui {
+                                 if self.active_modpack.as_ref() == Some(mp) {
+                                     ui.label(egui::RichText::new("⚠ MODPACK ACTIVO").color(egui::Color32::YELLOW).strong());
+                                     ui.label("Se eliminarán los mods del modpack Y también del juego (hardlinks).");
+                                 } else {
+                                     ui.label("¿Borrar mods seleccionados del modpack?");
+                                 }
+                             } else {
+                                 ui.label("¿Borrar mods seleccionados de disco?");
+                             }
+                        },
+                        DeletionConfirmation::Profile(name) => { ui.label(format!("¿Borrar perfil lógico '{}'? (No borra archivos)", name)); },
+                        DeletionConfirmation::None => { ui.label(""); },
                     };
                     
                     ui.add_space(10.0);
@@ -843,6 +913,9 @@ impl eframe::App for ModUpdaterApp {
                                         PATHS.mods_folder.clone()
                                     };
                                     
+                                    // Check if we need dual deletion (Active Modpack)
+                                    let is_active = self.selected_modpack_ui.is_some() && self.active_modpack == self.selected_modpack_ui;
+
                                     let mut removed_cnt = 0;
                                     // Clonamos para evitar problemas de borrow checker al iterar y modificar
                                     let keys_to_remove: Vec<String> = self.mods.iter()
@@ -851,10 +924,17 @@ impl eframe::App for ModUpdaterApp {
                                         .collect();
 
                                     for key in keys_to_remove {
+                                        // 1. Delete source
                                         let path = target_folder.join(&key);
                                         if std::fs::remove_file(&path).is_ok() {
                                             self.mods.shift_remove(&key);
                                             removed_cnt += 1;
+                                            
+                                            // 2. Delete hardlink if active
+                                            if is_active {
+                                                let link_path = PATHS.mods_folder.join(&key);
+                                                let _ = std::fs::remove_file(link_path);
+                                            }
                                         }
                                     }
                                     self.status_msg = format!("{} mods eliminados.", removed_cnt);

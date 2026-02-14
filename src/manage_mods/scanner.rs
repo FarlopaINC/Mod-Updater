@@ -7,7 +7,7 @@ use std::path::Path;
 use zip::ZipArchive;
 use std::time::SystemTime;
 
-fn get_file_mtime(metadata: &fs::Metadata) -> u64 {
+pub fn get_file_mtime(metadata: &fs::Metadata) -> u64 {
     metadata.modified()
         .unwrap_or(SystemTime::UNIX_EPOCH)
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -17,8 +17,6 @@ fn get_file_mtime(metadata: &fs::Metadata) -> u64 {
 
 pub fn read_mods_in_folder(mods_folder: &str) -> IndexMap<String, ModInfo> {
     let mut mods_map: IndexMap<String, ModInfo> = IndexMap::new();
-    let mut cache = load_cache();
-    let mut cache_dirty = false;
 
     if let Ok(entries) = fs::read_dir(mods_folder) {
         let mut entries_vec: Vec<_> = entries.filter_map(|e| e.ok()).collect();
@@ -37,9 +35,9 @@ pub fn read_mods_in_folder(mods_folder: &str) -> IndexMap<String, ModInfo> {
                     (0, 0)
                 };
 
-                // Check Cache
+                // Check Cache (Redb)
                 let mut use_cache = false;
-                if let Some(cached) = cache.get(&filename) {
+                if let Some(cached) = crate::manage_mods::cache::get_mod(&filename) {
                      // Verify integrity
                     if cached.file_size_bytes == Some(file_size) && cached.file_mtime_secs == Some(file_mtime) {
                         mods_map.insert(cached.key.clone(), cached.clone());
@@ -54,7 +52,7 @@ pub fn read_mods_in_folder(mods_folder: &str) -> IndexMap<String, ModInfo> {
                         mod_info.file_mtime_secs = Some(file_mtime);
                         
                         // If previous cache had useful remote info, preserve it if key matches
-                        if let Some(old) = cache.get(&filename) {
+                        if let Some(old) = crate::manage_mods::cache::get_mod(&filename) {
                             if old.key == mod_info.key {
                                 mod_info.confirmed_project_id = old.confirmed_project_id.clone();
                                 mod_info.version_remote = old.version_remote.clone();
@@ -62,20 +60,15 @@ pub fn read_mods_in_folder(mods_folder: &str) -> IndexMap<String, ModInfo> {
                             }
                         }
 
-                        // Update output and cache
+                        // Update output
                         mods_map.insert(mod_info.key.clone(), mod_info.clone());
                         
-                        // We use filename as key in cache to quickly lookup by file
-                        cache.insert(filename.clone(), mod_info); 
-                        cache_dirty = true;
+                        // Update Cache (Redb)
+                        crate::manage_mods::cache::upsert_mod(&filename, &mod_info); 
                     } 
                 }
             }        
         }
-    }
-    
-    if cache_dirty {
-        save_cache(&cache);
     }
     
     return mods_map;
@@ -139,39 +132,6 @@ pub fn read_single_mod(path: &Path) -> Result<ModInfo, String> {
     })
 }
 
-fn cache_path() -> Option<std::path::PathBuf> {
-    if let Some(mut dir) = dirs::cache_dir() {
-        dir.push("mods_updater");
-        if !dir.exists() {
-            let _ = fs::create_dir_all(&dir);
-        }
-        dir.push("modrinth_cache.json");
-        return Some(dir);
-    }
-    return None;
-}
-
-pub fn load_cache() -> IndexMap<String, ModInfo> {
-    if let Some(path) = cache_path() {
-        if path.exists() {
-            if let Ok(data) = fs::read_to_string(&path) {
-                if let Ok(map) = serde_json::from_str::<IndexMap<String, ModInfo>>(&data) {
-                    return map;
-                }
-            }
-        }
-    }
-    return IndexMap::new();
-}
-
-pub fn save_cache(map: &IndexMap<String, ModInfo>) {
-    if let Some(path) = cache_path() {
-        if let Ok(data) = serde_json::to_string_pretty(map) {
-            let _ = fs::write(path, data);
-        }
-    }
-}
-
 pub fn get_minecraft_versions(manifest_path: &str) -> Vec<String> {
     let data = fs::read_to_string(manifest_path)
         .expect("No se pudo leer version_manifest_v2.json");
@@ -203,3 +163,5 @@ pub fn list_modpacks() -> Vec<String> {
     sorted.sort();
     return sorted;
 }
+
+

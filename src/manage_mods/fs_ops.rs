@@ -21,7 +21,7 @@ pub fn prepare_output_folder(version: &str) {
     } 
 }   
 
-use rayon::prelude::*;
+
 
 pub fn change_mods(modpack: &str) -> Result<String, String> {
     let target = &PATHS.mods_folder;
@@ -51,17 +51,8 @@ pub fn change_mods(modpack: &str) -> Result<String, String> {
                      return Ok(format!("Mods cambiados a '{}' usando Hard Links (rápido).", modpack));
                  },
                  Err(e_hl) => {
-                     // 4. Intento 3: Copia Física Paralela (Fallback robusto)
-                     // Limpiamos lo que haya podido dejar el intento de hardlinks
-                     if target.exists() { let _ = fs::remove_dir_all(target); }
-                     
-                     match copy_modpack_parallel(source, target) {
-                        Ok(_) => {
-                            let _ = write_active_marker(modpack);
-                            Ok(format!("Mods cambiados a '{}' usando Copia Paralela (fallback).", modpack))
-                        },
-                        Err(e_cp) => Err(format!("Fallo total al cambiar mods.\nSymlink: {:?}\nHardLink: {:?}\nCopy: {:?}", e_sym, e_hl, e_cp)),
-                     }
+                     // 4. Fallo total
+                     Err(format!("Fallo al cambiar mods (se requieren permisos o misma partición).\nSymlink: {:?}\nHardLink: {:?}", e_sym, e_hl))
                  }
              }
         }
@@ -90,12 +81,6 @@ fn collect_copy_ops(src: &Path, dst: &Path, ops: &mut Vec<(PathBuf, PathBuf)>) -
 }
 
 pub fn copy_modpack_hardlinks(src: &Path, dst: &Path) -> std::io::Result<()> {
-    // Para hardlinks, igual necesitamos recorrer y linkear uno a uno.
-    // No podemos usar rayon fácilmente porque create_dir no es thread safe si colisionan, 
-    // pero la creación de links es rápida. Lo haremos secuencial o híbrido.
-    // Haremos secuencial la estructura de directorios y luego los links.
-    
-    // De hecho, podemos reusar la logica de collect para separar dirs y files.
     let mut files = Vec::new();
     collect_copy_ops(src, dst, &mut files)?;
     
@@ -106,19 +91,9 @@ pub fn copy_modpack_hardlinks(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-pub fn copy_modpack_parallel(src: &Path, dst: &Path) -> std::io::Result<()> {
-    let mut files = Vec::new();
-    collect_copy_ops(src, dst, &mut files)?;
-    
-    // Usar Rayon para copiar archivos en paralelo
-    files.par_iter().try_for_each(|(from, to)| {
-        fs::copy(from, to).map(|_| ())
-    })
-}
-
 // Marker file helpers
 fn active_marker_path() -> PathBuf {
-    PATHS.base_game_folder.join("mods_updater_active_modpack.txt")
+    return PATHS.base_game_folder.join("mods_updater_active_modpack.txt");
 }
 
 fn write_active_marker(modpack: &str) -> std::io::Result<()> {
@@ -126,7 +101,7 @@ fn write_active_marker(modpack: &str) -> std::io::Result<()> {
     if let Some(parent) = p.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    fs::write(p, modpack.as_bytes())
+    return fs::write(p, modpack.as_bytes());
 }
 
 pub fn read_active_marker() -> Option<String> {
@@ -136,5 +111,32 @@ pub fn read_active_marker() -> Option<String> {
             return Some(s.trim().to_string());
         }
     }
-    None
+    return None;
+}
+
+/// Elimina archivos `.part` huérfanos de descargas interrumpidas.
+/// Escanea recursivamente la carpeta de modpacks.
+pub fn cleanup_partial_downloads() {
+    let dir = &PATHS.modpacks_folder;
+    if !dir.exists() {
+        return;
+    }
+    cleanup_part_files_recursive(dir);
+}
+
+fn cleanup_part_files_recursive(dir: &Path) {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            cleanup_part_files_recursive(&path);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("part") {
+            println!("🧹 Eliminando descarga parcial: {}", path.display());
+            let _ = fs::remove_file(&path);
+        }
+    }
 }

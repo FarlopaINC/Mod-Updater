@@ -1,6 +1,10 @@
 use reqwest::blocking::Client;
+use reqwest::header::HeaderMap;
 use serde::Deserialize;
 use serde_json::json;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+use once_cell::sync::Lazy;
 
 #[derive(Debug, Deserialize)]
 pub struct ModrinthVersion {
@@ -36,9 +40,59 @@ pub struct ModrinthSearchHit {
     pub author: String,
 }
 
+// ── Rate Limiting ────────────────────────────────────────────
+
+struct ModrinthRateLimit {
+    remaining: u32,
+    reset_at: Instant,
+}
+
+static RATE_LIMIT: Lazy<Mutex<ModrinthRateLimit>> = Lazy::new(|| {
+    Mutex::new(ModrinthRateLimit {
+        remaining: 300, // Asumir cubo lleno al inicio
+        reset_at: Instant::now(),
+    })
+});
+
+/// Si quedan pocas peticiones, duerme hasta que se resetee la ventana.
+fn wait_for_ratelimit() {
+    let state = RATE_LIMIT.lock().unwrap();
+    if state.remaining < 5 {
+        let now = Instant::now();
+        if state.reset_at > now {
+            let wait = state.reset_at - now;
+            println!("⏳ Modrinth rate limit: esperando {:.1}s...", wait.as_secs_f32());
+            drop(state); // Liberar el mutex antes de dormir
+            std::thread::sleep(wait);
+        }
+    }
+}
+
+/// Actualiza el estado del rate limit con los headers de la respuesta.
+fn update_ratelimit(headers: &HeaderMap) {
+    let remaining = headers.get("x-ratelimit-remaining")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u32>().ok());
+
+    let reset_secs = headers.get("x-ratelimit-reset")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+
+    if let (Some(rem), Some(reset)) = (remaining, reset_secs) {
+        if let Ok(mut state) = RATE_LIMIT.lock() {
+            state.remaining = rem;
+            state.reset_at = Instant::now() + Duration::from_secs(reset);
+        }
+    }
+}
+
+// ── Client ───────────────────────────────────────────────────
+
 fn build_modrinth_client() -> Client {
     Client::builder().user_agent("ModsUpdater/1.0 (github.com/FarlopaINC)").build().unwrap()
 }
+
+// ── API Functions ────────────────────────────────────────────
 
 pub fn search_modrinth_project(query: &str, loader: &Option<String>, version: &Option<String>, offset: u32, limit: u32) -> Vec<ModrinthSearchHit> {
     let client = build_modrinth_client();
@@ -75,8 +129,11 @@ pub fn search_modrinth_project(query: &str, loader: &Option<String>, version: &O
         params.push(("facets", &facets_str));
     }
 
+    wait_for_ratelimit();
+
     match client.get(search_url).query(&params).send() {
         Ok(resp) => {
+            update_ratelimit(resp.headers());
             if resp.status().is_success() {
                 let results: ModrinthSearchResults = resp.json().unwrap_or(ModrinthSearchResults { hits: vec![] });
                 return results.hits;
@@ -104,8 +161,11 @@ pub fn fetch_modrinth_version(mod_id: &str, version: &str, loader: &str) -> Opti
         ("game_versions", &versions_json),
     ];
 
+    wait_for_ratelimit();
+
     match client.get(&api_url).query(&params).send() {
         Ok(resp) => {
+            update_ratelimit(resp.headers());
             if resp.status().is_success() {
                 let versions: Vec<ModrinthVersion> = resp.json().unwrap_or_default();
                 return versions.into_iter().next();

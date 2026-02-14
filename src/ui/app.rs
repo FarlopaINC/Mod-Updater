@@ -977,7 +977,10 @@ impl eframe::App for ModUpdaterApp {
                         if tui_button_c(ui, "CANCEL", tui_theme::NEON_RED).clicked() {
                             close_requested = true;
                         }
-                        if tui_button_c(ui, "OK", tui_theme::NEON_GREEN).clicked() {
+                        let has_active = self.active_downloads.values().any(|s| matches!(s, ModStatus::Resolving | ModStatus::Downloading(_)));
+                        if has_active {
+                            tui_dim(ui, "[WAIT]");
+                        } else if tui_button_c(ui, "OK", tui_theme::NEON_GREEN).clicked() {
                             if !name.trim().is_empty() {
                                 // Logic to start download
                                 let output_folder_path = PATHS.modpacks_folder.join(&name);

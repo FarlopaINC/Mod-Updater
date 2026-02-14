@@ -14,7 +14,8 @@ use crate::manage_mods::{
 use crate::fetch::async_download::{spawn_workers, DownloadJob, DownloadEvent};
 use crate::fetch::single_mod_search::{UnifiedSearchResult, search_unified, SearchRequest};
 use crate::paths_vars::PATHS;
-use super::utils::{format_dep_name, format_version_range};  
+use super::utils::{format_dep_name, format_version_range};
+use super::tui_theme::{self, tui_button, tui_button_c, tui_checkbox, tui_heading, tui_separator, tui_tab, tui_dim, tui_number};
 
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub enum SearchSource {
@@ -155,6 +156,9 @@ pub struct ModUpdaterApp {
 
 impl ModUpdaterApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        // Aplicar tema TUI
+        tui_theme::apply_tui_theme(&_cc.egui_ctx);
+
         // Detect active modpack first to use in logic
         let active_modpack = crate::manage_mods::fs_ops::read_active_marker();
 
@@ -320,21 +324,19 @@ impl ModUpdaterApp {
         SidePanel::right("selector_modpacks")
         .resizable(true)
         .default_width(200.0)
-        .show(ctx, |ui| {  
-            ui.add_space(6.0);  
-            ui.heading("MODPACKS");
-            ui.add_space(6.0);
+        .show(ctx, |ui| {
+            ui.add_space(4.0);
+            tui_heading(ui, "MODPACKS");
+            ui.add_space(4.0);
             let modpacks = self.cached_modpacks.clone();
 
             if modpacks.is_empty() {
-                ui.label("No hay modpacks disponibles");
+                tui_dim(ui, "(vacio)");
             } else {
                 ScrollArea::vertical().show(ui, |ui| {
                     for mp in modpacks {
-                        // Determine selection state
                         let is_selected_ui = self.selected_modpack_ui.as_ref() == Some(&mp);
                         
-                        // Check if active on disk
                         let is_active_disk = match PATHS.mods_folder.read_link() {
                             Ok(link) => link.ends_with(&mp),
                             Err(_) => match read_active_marker() {
@@ -343,43 +345,46 @@ impl ModUpdaterApp {
                             },
                         };
 
-                        let label_text = if is_active_disk {
-                            format!("{} (Activo)", mp)
+                        let indicator = if is_active_disk && is_selected_ui {
+                            ">>" 
+                        } else if is_selected_ui {
+                            "> "
                         } else {
-                            mp.clone()
+                            "  "
                         };
 
+                        let suffix = if is_active_disk { " (ACT)" } else { "" };
+
                         ui.horizontal(|ui| {
-                            // Layout: Botones de acción a la derecha, botón principal llena el resto
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.button("🗑").on_hover_text("Eliminar modpack").clicked() {
+                                if tui_button_c(ui, "X", tui_theme::NEON_RED).on_hover_text("Eliminar modpack").clicked() {
                                     self.deletion_confirmation = DeletionConfirmation::Modpack(mp.clone());
                                 }
 
-                                // Si está seleccionado en la UI y no es el activo en disco, mostrar rayo
                                 if is_selected_ui && !is_active_disk {
-                                    if ui.button("⚡").on_hover_text("Activar este modpack").clicked() {
+                                    if tui_button_c(ui, "!", tui_theme::NEON_GREEN).on_hover_text("Activar este modpack").clicked() {
                                         self.status_msg = match change_mods(&mp) {
                                             Ok(msg) => msg,
                                             Err(e) => format!("Error: {}", e),
                                         };
                                     }
                                 }
-                                
-                                // Rellenar resto con nombre
+
                                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                    if ui.add_sized(ui.available_size(), egui::Button::new(label_text).selected(is_selected_ui)).clicked() {
+                                    let label = format!("{}{}{}", indicator, mp, suffix);
+                                    let color = if is_selected_ui { tui_theme::ACCENT } else { tui_theme::TEXT_PRIMARY };
+                                    let text = egui::RichText::new(&label).color(color).family(egui::FontFamily::Monospace);
+                                    if ui.add_sized(ui.available_size(), egui::Button::new(text)
+                                        .fill(egui::Color32::TRANSPARENT)
+                                        .stroke(egui::Stroke::NONE)
+                                        .corner_radius(egui::CornerRadius::ZERO)).clicked() {
                                         let target_folder = if is_selected_ui {
-                                            // Deseleccionar -> Cargar instalados
                                             self.selected_modpack_ui = None;
                                             PATHS.mods_folder.clone()
                                         } else {
-                                            // Seleccionar -> Cargar preview
                                             self.selected_modpack_ui = Some(mp.clone());
                                             PATHS.modpacks_folder.join(&mp)
                                         };
-
-                                        // Usar método helper
                                         self.load_mods_from_folder(&target_folder);
                                     }
                                 });
@@ -392,17 +397,16 @@ impl ModUpdaterApp {
     }
 
     fn render_explorer_center(&mut self, ui: &mut egui::Ui) {
-        // Central Panel Content for Explorer
         let title = if let Some(mp) = &self.selected_modpack_ui {
-             format!("Mods en: {}", mp)
+             format!("MODS EN: {}", mp.to_uppercase())
         } else {
-             "Mods Instalados (Activos)".to_string()
+             "MODS INSTALADOS (ACTIVOS)".to_string()
         };
-        ui.heading(title);
+        tui_heading(ui, &title);
         
         ui.add_space(2.0);
         ui.horizontal(|ui| {
-            if ui.button(" 🔁 ")
+            if tui_button(ui, "F5")
                 .on_hover_text("Actualiza la lista.")
                 .clicked() {
                     let folder = if let Some(mp) = &self.selected_modpack_ui {
@@ -425,7 +429,7 @@ impl ModUpdaterApp {
                     self.status_msg = "Actualizando lista de mods...".to_string();
             }
 
-            if ui.button("🔍 Buscar Mods").clicked() {
+            if tui_button(ui, "BUSCAR").clicked() {
                 self.search_state.open = true;
                 self.search_state.source = SearchSource::Explorer;
                 // Sync defaults with current selection if first open or reset?
@@ -437,19 +441,19 @@ impl ModUpdaterApp {
                 self.search_state.page = 0;
             }
 
-            if ui.button(" ⬇ ")
+            if tui_button_c(ui, "DL", tui_theme::NEON_YELLOW)
                 .on_hover_text("Actualizar mods")
                 .clicked() {
                     // Open confirmation modal with default name
                     self.download_confirmation_name = Some(format!("mods{}", self.selected_mc_version));
             }
              
-            if ui.button(" 🗑 ").clicked() {
+            if tui_button_c(ui, "DEL", tui_theme::NEON_RED).clicked() {
                 self.deletion_confirmation = DeletionConfirmation::SelectedMods;
             }
 
             let all_selected = self.mods.values().all(|m| m.selected);
-            if ui.button(if all_selected { "✅ Todo" } else { "⬜ Todo" }).clicked() {
+            if tui_button(ui, if all_selected { "x ALL" } else { "o ALL" }).clicked() {
                 if all_selected {
                     for m in self.mods.values_mut() { m.selected = false; }                       
                 } else {
@@ -457,7 +461,7 @@ impl ModUpdaterApp {
                 }
             }
 
-            if ui.button(" 💾 ")
+            if tui_button_c(ui, "SAVE", tui_theme::NEON_GREEN)
             .on_hover_text("Crea un perfil con los mods seleccionados.")
             .clicked() {
                 // Open modal instead of creating directly
@@ -470,18 +474,26 @@ impl ModUpdaterApp {
             for key in keys {
                 if let Some(m) = self.mods.get_mut(&key) {
                     ui.horizontal(|ui| {
-                        ui.checkbox(&mut m.selected, "");
+                        tui_checkbox(ui, &mut m.selected);
                         
                         ui.vertical(|ui| {
                             ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new(&m.name).size(16.0).strong());
+                                ui.label(egui::RichText::new(&m.name)
+                                    .family(egui::FontFamily::Monospace)
+                                    .color(tui_theme::TEXT_PRIMARY)
+                                    .strong());
                                 if let Some(v) = &m.version_local {
-                                    ui.label(egui::RichText::new(format!("v{}", v)).color(ui.visuals().weak_text_color()));
+                                    ui.label(egui::RichText::new(format!("v{}", v))
+                                        .family(egui::FontFamily::Monospace)
+                                        .color(tui_theme::TEXT_DIM)
+                                        .size(11.0));
                                 }
                                 
-                                // Check memory for known issues
                                 if let Some(issue) = self.memory.check(&m.name) {
-                                    ui.label("⚠️").on_hover_text(format!("Problema conocido: {}\nSolución: {:?}", issue.issue_description, issue.fix));
+                                    ui.label(egui::RichText::new("[!]")
+                                        .family(egui::FontFamily::Monospace)
+                                        .color(tui_theme::WARNING))
+                                        .on_hover_text(format!("Problema: {}\nFix: {:?}", issue.issue_description, issue.fix));
                                 }
                             });
 
@@ -520,11 +532,7 @@ impl ModUpdaterApp {
                                 }
 
                                 if !display_items.is_empty() {
-                                    ui.label(
-                                        egui::RichText::new(display_items.join("  |  "))
-                                        .size(11.0)
-                                        .color(ui.visuals().weak_text_color())
-                                    );
+                                    tui_dim(ui, &format!("├── {}", display_items.join("  |  ")));
                                 }
                             }
                         });
@@ -532,39 +540,30 @@ impl ModUpdaterApp {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             match &m.status {
                                 ModStatus::Idle => {
-                                    // Check if we are viewing the active modpack to show Toggle Link
                                     if let Some(active) = &self.active_modpack {
                                         if let Some(selected) = &self.selected_modpack_ui {
                                             if active == selected {
-                                                // Check if linked (exists in /mods)
-                                                // We can check efficiently or assume state?
-                                                // Let's check existence for now.
                                                 let link_path = crate::paths_vars::PATHS.mods_folder.join(&m.inner.key);
                                                 let is_linked = link_path.exists();
 
                                                 if is_linked {
-                                                    if ui.button("🔌").on_hover_text("Desactivar (Desvincular)").clicked() {
-                                                        // Unlink
+                                                    if tui_button_c(ui, "ON", tui_theme::NEON_GREEN).on_hover_text("Desactivar").clicked() {
                                                         let _ = std::fs::remove_file(&link_path);
                                                     }
                                                 } else {
-                                                     if ui.button("⚪").on_hover_text("Activar (Vincular)").clicked() {
-                                                        // Link
+                                                     if tui_button(ui, "--").on_hover_text("Activar").clicked() {
                                                         let source_path = crate::paths_vars::PATHS.modpacks_folder.join(selected).join(&m.inner.key);
-                                                        // Try hardlink
-                                                        if std::fs::hard_link(&source_path, &link_path).is_err() {
-                                                            // error handling?
-                                                        }
+                                                        if std::fs::hard_link(&source_path, &link_path).is_err() {}
                                                      }
                                                 }
                                             }
                                         }
                                     }
                                 },
-                                ModStatus::Resolving => { ui.label("⌛"); },
-                                ModStatus::Downloading(p) => { ui.label(format!("📥 {:.0}%", p * 100.0)); },
-                                ModStatus::Done => { ui.label("✅"); },
-                                ModStatus::Error(msg) => { ui.label(format!("❌ {}", msg)); },
+                                ModStatus::Resolving => { tui_theme::tui_status(ui, "[...]", tui_theme::NEON_YELLOW); },
+                                ModStatus::Downloading(p) => { tui_theme::tui_status(ui, &format!("[{:.0}%]", p * 100.0), tui_theme::NEON_YELLOW); },
+                                ModStatus::Done => { tui_theme::tui_status(ui, "[OK]", tui_theme::SUCCESS); },
+                                ModStatus::Error(_msg) => { tui_theme::tui_status(ui, "[ERR]", tui_theme::ERROR); },
                             }
                         });
                     });
@@ -579,37 +578,43 @@ impl ModUpdaterApp {
             .resizable(true)
             .default_width(200.0)
             .show(ctx, |ui| {
-                ui.add_space(5.0);
+                ui.add_space(4.0);
                 
                 ui.horizontal(|ui| {
-                    if ui.button(" ➕ ").on_hover_text("Crear perfil").clicked() {
+                    if tui_button_c(ui, "+", tui_theme::NEON_GREEN).on_hover_text("Crear perfil").clicked() {
                          self.create_profile_modal_name = Some(String::new());
                     }
-                    if ui.button(" ⬇ ").on_hover_text("Instalar/Descargar").clicked() {
+                    if tui_button_c(ui, "DL", tui_theme::NEON_YELLOW).on_hover_text("Instalar/Descargar").clicked() {
                         if let Some(selected) = &self.selected_profile_name {
-                             // Open download modal for profile
                              self.download_confirmation_name = Some(selected.clone());
                              self.download_source = DownloadSource::Profile(selected.clone());
                         } else {
-                            self.status_msg = "Selecciona un perfil primero para descargar.".to_string();
+                            self.status_msg = "Selecciona un perfil primero.".to_string();
                         }   
                     }
                 });
                 
-                ui.separator();
+                tui_separator(ui);
 
                 ScrollArea::vertical().show(ui, |ui| {
                     let names: Vec<String> = self.profiles_db.profiles.keys().cloned().collect();
                     for name in names {
                         ui.horizontal(|ui| {
                             let is_selected = self.selected_profile_name.as_ref() == Some(&name);
-                            if ui.selectable_label(is_selected, &name).clicked() {
+                            let indicator = if is_selected { "> " } else { "  " };
+                            let color = if is_selected { tui_theme::ACCENT } else { tui_theme::TEXT_PRIMARY };
+                            let text = egui::RichText::new(format!("{}{}", indicator, name))
+                                .family(egui::FontFamily::Monospace).color(color);
+                            if ui.add(egui::Button::new(text)
+                                .fill(egui::Color32::TRANSPARENT)
+                                .stroke(egui::Stroke::NONE)
+                                .corner_radius(egui::CornerRadius::ZERO)).clicked() {
                                 if self.selected_profile_name.as_ref() != Some(&name) {
                                     self.selected_profile_name = Some(name.clone());
                                     self.profile_mods_pending_deletion.clear();
                                 }
                             }
-                            if ui.button("🗑").clicked() {
+                            if tui_button_c(ui, "X", tui_theme::NEON_RED).clicked() {
                                 self.deletion_confirmation = DeletionConfirmation::Profile(name.clone());
                             }
                         });
@@ -624,16 +629,16 @@ impl ModUpdaterApp {
             let mut should_save = false; 
             if let Some(profile) = self.profiles_db.get_profile_mut(name) {
                 ui.horizontal(|ui| {
-                    ui.label("Nombre:");
+                    tui_dim(ui, "Nombre:");
                     ui.text_edit_singleline(&mut profile.name);
                     
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add_sized([40.0, 40.0], egui::Button::new("💾")).on_hover_text("Guardar cambios").clicked() {
+                        if tui_button_c(ui, "SAVE", tui_theme::NEON_GREEN).on_hover_text("Guardar cambios").clicked() {
                             should_save = true;
                             self.status_msg = "Perfil guardado.".to_string();
                         }
                         ui.add_space(5.0);
-                        if ui.add_sized([40.0, 40.0], egui::Button::new("🔍")).on_hover_text("Buscar / Añadir Mod").clicked() {
+                        if tui_button(ui, "BUSCAR").on_hover_text("Buscar / Añadir Mod").clicked() {
                              self.search_state.open = true;
                              self.search_state.source = SearchSource::Profile(name.clone());
                              
@@ -648,8 +653,8 @@ impl ModUpdaterApp {
                     });
                 });
                 
-                ui.separator();
-                ui.label(format!("Mods: {}", profile.mods.len()));
+                tui_separator(ui);
+                ui.horizontal(|ui| { tui_dim(ui, "Mods: "); tui_number(ui, &profile.mods.len().to_string()); });
                 
                 ScrollArea::vertical().id_salt("profile_mods_scroll").show(ui, |ui| {
                     // Collect toggle actions to avoid borrowing issues in loop
@@ -660,32 +665,36 @@ impl ModUpdaterApp {
                         let is_pending = self.profile_mods_pending_deletion.contains(k);
                         ui.horizontal(|ui| {
                             if is_pending {
-                                ui.label(egui::RichText::new(&m.name).strikethrough().color(ui.visuals().weak_text_color()));
+                                ui.label(egui::RichText::new(&m.name)
+                                    .family(egui::FontFamily::Monospace)
+                                    .strikethrough()
+                                    .color(tui_theme::TEXT_DIM));
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.add_space(15.0); // Padding from scrollbar
-                                    if ui.button("↩").on_hover_text("Restaurar mod").clicked() {
+                                    ui.add_space(15.0);
+                                    if tui_button_c(ui, "UNDO", tui_theme::NEON_GREEN).on_hover_text("Restaurar mod").clicked() {
                                         to_unmark.push(k.clone());
                                     }
                                 });
                             } else {
-                                ui.label(&m.name);
+                                ui.label(egui::RichText::new(&m.name)
+                                    .family(egui::FontFamily::Monospace)
+                                    .color(tui_theme::TEXT_PRIMARY));
                                 
-                                // Show progress if downloading
                                 if let Some(status) = self.active_downloads.get(k) {
                                     match status {
                                         ModStatus::Downloading(p) => {
-                                            ui.add(egui::ProgressBar::new(*p).show_percentage());
+                                            tui_theme::tui_status(ui, &format!("[{:.0}%]", p * 100.0), tui_theme::NEON_YELLOW);
                                         },
-                                        ModStatus::Resolving => { ui.label("Resolviendo..."); },
-                                        ModStatus::Done => { ui.label("✔"); },
-                                        ModStatus::Error(e) => { ui.label(egui::RichText::new(format!("Error: {}", e)).color(egui::Color32::RED)); },
+                                        ModStatus::Resolving => { tui_theme::tui_status(ui, "[...]", tui_theme::NEON_YELLOW); },
+                                        ModStatus::Done => { tui_theme::tui_status(ui, "[OK]", tui_theme::NEON_GREEN); },
+                                        ModStatus::Error(e) => { tui_theme::tui_status(ui, &format!("[ERR: {}]", e), tui_theme::NEON_RED); },
                                         _ => {}
                                     }
                                 }
 
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.add_space(15.0); // Padding from scrollbar
-                                    if ui.button("❌").on_hover_text("Marcar para borrar").clicked() {
+                                    ui.add_space(15.0);
+                                    if tui_button_c(ui, "X", tui_theme::NEON_RED).on_hover_text("Marcar para borrar").clicked() {
                                         to_mark.push(k.clone());
                                     }
                                 });
@@ -733,7 +742,7 @@ impl ModUpdaterApp {
                 save_profiles(&self.profiles_db);
             }
         } else {
-            ui.label("Selecciona un perfil de la izquierda o crea uno nuevo.");
+            tui_dim(ui, "Selecciona un perfil o crea uno nuevo.");
         }
     }
 }
@@ -743,10 +752,10 @@ impl eframe::App for ModUpdaterApp {
         // --- Top Bar (Tabs) ---
         TopBottomPanel::top("top_tabs").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if ui.selectable_label(self.current_tab == AppTab::Explorer, "📂 Mods").clicked() {
+                if tui_tab(ui, "MODS", self.current_tab == AppTab::Explorer).clicked() {
                     self.current_tab = AppTab::Explorer;
                 }
-                if ui.selectable_label(self.current_tab == AppTab::Profiles, "👥 Perfiles").clicked() {
+                if tui_tab(ui, "PERFILES", self.current_tab == AppTab::Profiles).clicked() {
                     self.current_tab = AppTab::Profiles;
                 }
             });
@@ -755,7 +764,7 @@ impl eframe::App for ModUpdaterApp {
         // --- Status Bar ---
         TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.label(&self.status_msg);
+                tui_dim(ui, &format!(">> {}", self.status_msg));
             });
         });
 
@@ -840,35 +849,35 @@ impl eframe::App for ModUpdaterApp {
 
         // --- Global Deletion Modal ---
         if self.deletion_confirmation != DeletionConfirmation::None {
-            egui::Window::new("Confirmar Acción")
+            egui::Window::new("CONFIRMAR")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .show(ctx, |ui| {
                     match &self.deletion_confirmation {
-                        DeletionConfirmation::Modpack(name) => { ui.label(format!("¿Borrar modpack '{}' de disco?", name)); },
+                        DeletionConfirmation::Modpack(name) => { tui_dim(ui, &format!("Borrar modpack '{}' de disco?", name)); },
                         DeletionConfirmation::SelectedMods => {
                              if let Some(mp) = &self.selected_modpack_ui {
                                  if self.active_modpack.as_ref() == Some(mp) {
-                                     ui.label(egui::RichText::new("⚠ MODPACK ACTIVO").color(egui::Color32::YELLOW).strong());
-                                     ui.label("Se eliminarán los mods del modpack Y también del juego (hardlinks).");
+                                     tui_theme::tui_status(ui, "[!] MODPACK ACTIVO", tui_theme::WARNING);
+                                     tui_dim(ui, "Se borraran mods del modpack Y del juego.");
                                  } else {
-                                     ui.label("¿Borrar mods seleccionados del modpack?");
+                                     tui_dim(ui, "Borrar mods seleccionados del modpack?");
                                  }
                              } else {
-                                 ui.label("¿Borrar mods seleccionados de disco?");
+                                 tui_dim(ui, "Borrar mods seleccionados de disco?");
                              }
                         },
-                        DeletionConfirmation::Profile(name) => { ui.label(format!("¿Borrar perfil lógico '{}'? (No borra archivos)", name)); },
-                        DeletionConfirmation::None => { ui.label(""); },
+                        DeletionConfirmation::Profile(name) => { tui_dim(ui, &format!("Borrar perfil '{}'? (No borra archivos)", name)); },
+                        DeletionConfirmation::None => {},
                     };
                     
-                    ui.add_space(10.0);
+                    ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Cancelar").clicked() {
+                        if tui_button_c(ui, "CANCEL", tui_theme::NEON_RED).clicked() {
                             self.deletion_confirmation = DeletionConfirmation::None;
                         }
-                        if ui.button("Confirmar").clicked() {
+                        if tui_button_c(ui, "OK", tui_theme::NEON_RED).clicked() {
                             match self.deletion_confirmation.clone() {
                                 DeletionConfirmation::Modpack(name) => {
                                     let target = PATHS.modpacks_folder.join(&name);
@@ -938,22 +947,22 @@ impl eframe::App for ModUpdaterApp {
 
             let mut close_requested = false;
 
-            egui::Window::new("Confirmar Descarga")
+            egui::Window::new("DESCARGA")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .open(&mut open)
                 .show(ctx, |ui| {
-                    ui.label("Nombre de la carpeta del Modpack:");
+                    tui_dim(ui, "Carpeta del Modpack:");
                     ui.text_edit_singleline(&mut name);
                     
-                    ui.add_space(10.0);
-                    ui.separator();
+                    ui.add_space(8.0);
+                    tui_separator(ui);
                     ui.add_space(5.0);
                     
                     // 1. Selector de Loader
                     ui.horizontal(|ui| {
-                        ui.label("Loader:");
+                        tui_dim(ui, "Loader:");
                         egui::ComboBox::from_id_salt("loader-selector-modal")
                             .selected_text(&self.selected_loader)
                             .show_ui(ui, |ui| {
@@ -963,7 +972,7 @@ impl eframe::App for ModUpdaterApp {
                             });
 
                         // 2. Selector de Versión MC
-                        ui.label("Versión:");
+                        tui_dim(ui, "Version:");
                         egui::ComboBox::from_id_salt("mc-version-box-modal")
                             .selected_text(&self.selected_mc_version)
                             .show_ui(ui, |ui| {
@@ -978,10 +987,10 @@ impl eframe::App for ModUpdaterApp {
                     ui.add_space(10.0);
 
                     ui.horizontal(|ui| {
-                        if ui.button("Cancelar").clicked() {
+                        if tui_button_c(ui, "CANCEL", tui_theme::NEON_RED).clicked() {
                             close_requested = true;
                         }
-                        if ui.button("Confirmar").clicked() {
+                        if tui_button_c(ui, "OK", tui_theme::NEON_GREEN).clicked() {
                             if !name.trim().is_empty() {
                                 // Logic to start download
                                 let output_folder_path = PATHS.modpacks_folder.join(&name);
@@ -1045,21 +1054,21 @@ impl eframe::App for ModUpdaterApp {
             let mut open = true;
             let mut close_requested = false;
 
-            egui::Window::new("Crear Perfil")
+            egui::Window::new("CREAR PERFIL")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .open(&mut open)
                 .show(ctx, |ui| {
-                    ui.label("Nombre del Perfil:");
+                    tui_dim(ui, "Nombre del Perfil:");
                     ui.text_edit_singleline(&mut name);
-                    ui.add_space(10.0);
+                    ui.add_space(8.0);
                     
                     ui.horizontal(|ui| {
-                        if ui.button("Cancelar").clicked() {
+                        if tui_button_c(ui, "CANCEL", tui_theme::NEON_RED).clicked() {
                             close_requested = true;
                         }
-                        if ui.button("Guardar").clicked() {
+                        if tui_button_c(ui, "SAVE", tui_theme::NEON_GREEN).clicked() {
                             if !name.trim().is_empty() {
                                 if self.current_tab == AppTab::Explorer {
                                     // Create from selected mods
@@ -1112,9 +1121,9 @@ impl ModUpdaterApp {
         if !open { return; }
 
          let title = if let SearchSource::Profile(p) = &self.search_state.source {
-             format!("🔍 Buscar Mods para '{}'", p)
+             format!("BUSCAR para '{}'", p)
          } else {
-             "🔍 Buscar Mods (Descargar)".to_string()
+             "BUSCAR MODS".to_string()
          };
 
         egui::Window::new(&title)
@@ -1126,7 +1135,7 @@ impl ModUpdaterApp {
                 
                 if is_explorer {
                     ui.horizontal(|ui| {
-                        ui.label("Loader:");
+                        tui_dim(ui, "Loader:");
                         egui::ComboBox::from_id_salt("search_loader")
                             .selected_text(&self.search_state.loader)
                             .show_ui(ui, |ui| {
@@ -1135,7 +1144,7 @@ impl ModUpdaterApp {
                                 }
                             });
 
-                        ui.label("Versión:");
+                        tui_dim(ui, "Version:");
                         egui::ComboBox::from_id_salt("search_version_selector")
                             .selected_text(&self.search_state.version)
                             .show_ui(ui, |ui| {
@@ -1148,7 +1157,7 @@ impl ModUpdaterApp {
                 }
 
                 ui.horizontal(|ui| {
-                    ui.label("Buscar:");
+                    tui_dim(ui, "Buscar:");
                     let text_box = ui.text_edit_singleline(&mut self.search_state.query);
                     
                     let mut do_search = false;
@@ -1156,7 +1165,7 @@ impl ModUpdaterApp {
                     if text_box.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                          do_search = true;
                     }
-                    if ui.button("Buscar").clicked() {
+                    if tui_button(ui, "GO").clicked() {
                          do_search = true;
                     }
 
@@ -1185,25 +1194,25 @@ impl ModUpdaterApp {
                 });
                 
                 if self.search_state.is_searching && self.search_state.page == 0 {
-                    ui.spinner();
-                    ui.label("Buscando en Modrinth y CurseForge...");
+                    tui_theme::tui_status(ui, "[...] Buscando...", tui_theme::TEXT_DIM);
                 }
 
-                ui.separator();
+                tui_separator(ui);
 
                 egui::ScrollArea::vertical().max_height(450.0).show(ui, |ui| {
                     for res in &self.search_state.results {
                         ui.group(|ui| {
                             ui.horizontal(|ui| {
                                 ui.vertical(|ui| {
-                                    ui.heading(&res.name);
-                                    ui.label(egui::RichText::new(&res.author).weak());
-                                    // Use small truncate or multiline?
-                                    ui.label(egui::RichText::new(&res.description).weak().size(10.0));
+                                    ui.label(egui::RichText::new(&res.name)
+                                        .family(egui::FontFamily::Monospace)
+                                        .color(tui_theme::TEXT_PRIMARY).strong());
+                                    tui_dim(ui, &res.author);
+                                    tui_dim(ui, &res.description);
                                     
                                     ui.horizontal(|ui| {
-                                        if res.modrinth_id.is_some() { ui.label(egui::RichText::new("Modrinth").color(egui::Color32::GREEN)); }
-                                        if res.curseforge_id.is_some() { ui.label(egui::RichText::new("CurseForge").color(egui::Color32::ORANGE)); }
+                                        if res.modrinth_id.is_some() { tui_theme::tui_status(ui, "[MR]", tui_theme::NEON_GREEN); }
+                                        if res.curseforge_id.is_some() { tui_theme::tui_status(ui, "[CF]", tui_theme::NEON_YELLOW); }
                                     });
                                 });
 
@@ -1214,14 +1223,14 @@ impl ModUpdaterApp {
                                             // Check progress by name
                                             if let Some(status) = self.active_downloads.get(&res.name) {
                                                 match status {
-                                                    ModStatus::Downloading(p) => { ui.add(egui::ProgressBar::new(*p).show_percentage().animate(true)); },
-                                                    ModStatus::Resolving => { ui.spinner(); ui.label("Resolviendo..."); },
-                                                    ModStatus::Done => { ui.label("✔ Instalado"); },
-                                                    ModStatus::Error(e) => { ui.colored_label(egui::Color32::RED, "Error"); ui.label(e); },
+                                                    ModStatus::Downloading(p) => { tui_theme::tui_status(ui, &format!("[{:.0}%]", p * 100.0), tui_theme::NEON_YELLOW); },
+                                                    ModStatus::Resolving => { tui_theme::tui_status(ui, "[...]", tui_theme::NEON_YELLOW); },
+                                                    ModStatus::Done => { tui_theme::tui_status(ui, "[OK]", tui_theme::NEON_GREEN); },
+                                                    ModStatus::Error(e) => { tui_theme::tui_status(ui, &format!("[ERR: {}]", e), tui_theme::NEON_RED); },
                                                     _ => {}
                                                 }
                                             } else {
-                                                if ui.button("📥 Descargar").clicked() {
+                                                if tui_button_c(ui, "DL", tui_theme::NEON_YELLOW).clicked() {
                                                     // Trigger Download
                                                     // Construct ModInfo
                                                     let mod_info = crate::manage_mods::ModInfo {
@@ -1261,7 +1270,7 @@ impl ModUpdaterApp {
                                             }
                                         },
                                         SearchSource::Profile(p_name) => {
-                                            if ui.button("➕ Añadir").clicked() {
+                                            if tui_button_c(ui, "ADD", tui_theme::NEON_GREEN).clicked() {
                                                 if let Some(profile) = self.profiles_db.get_profile_mut(p_name) {
                                                     // Add to profile
                                                     let mod_info = crate::manage_mods::ModInfo {
@@ -1295,7 +1304,7 @@ impl ModUpdaterApp {
                         if self.search_state.is_searching {
                             ui.spinner();
                         } else {
-                            if ui.button("⬇ Cargar más resultados").clicked() {
+                            if tui_button(ui, "MAS").clicked() {
                                 self.search_state.is_searching = true;
                                 self.search_state.page += 1;
                                 let offset = self.search_state.page * self.search_state.limit;

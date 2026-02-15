@@ -1,7 +1,6 @@
-use mods_updater::fetch::search::{search_unified, SearchRequest};
+use mods_updater::fetch::single_mod_search::{search_unified, SearchRequest};
 use std::env;
 
-// Helper para verificar API key
 fn has_curse_key() -> bool {
     env::var("CURSEFORGE_API_KEY").is_ok_and(|k| !k.is_empty())
 }
@@ -26,9 +25,6 @@ fn test_unified_flow() {
     assert!(first.modrinth_id.is_some(), "Should have Modrinth ID (primary source)");
 
     if has_curse_key() {
-        // Si tenemos key, verificamos la fusión.
-        // Buscamos algún resultado que tenga AMBOS IDs.
-        // JEI es muy probable que los tenga.
         let merged = results.iter().find(|r| r.modrinth_id.is_some() && r.curseforge_id.is_some());
         
         if let Some(m) = merged {
@@ -36,9 +32,6 @@ fn test_unified_flow() {
                 m.name, m.modrinth_id, m.curseforge_id);
         } else {
             println!("⚠️ Warning: No merged results found for JEI. Check naming/slug inconsistencies.");
-            // No fallamos el test fuertemente porque a veces los nombres difieren y no hacen mach,
-            // pero imprimimos advertencia.
-            // Para debugging, imprimimos lo que encontramos:
             for r in &results {
                 println!("- {} (M: {:?}, C: {:?})", r.name, r.modrinth_id, r.curseforge_id);
             }

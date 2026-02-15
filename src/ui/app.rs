@@ -9,7 +9,7 @@ use indexmap::IndexMap;
 use crate::local_mods_ops::{
     change_mods, list_modpacks, get_minecraft_versions, read_active_marker,
     spawn_read_workers, ReadJob, ReadEvent,
-    ModInfo, TroubleshootMemory, load_memory,
+    ModInfo,
 };
 use crate::profiles::{ProfilesDatabase, Profile, load_profiles, save_profiles};
 use crate::fetch::async_download::{spawn_workers, DownloadJob, DownloadEvent};
@@ -125,7 +125,6 @@ pub struct ModUpdaterApp {
 
     // --- Profiles State ---
     pub profiles_db: ProfilesDatabase,
-    pub memory: TroubleshootMemory,
     pub selected_profile_name: Option<String>,
     pub profile_mods_pending_deletion: HashSet<String>,
 
@@ -238,7 +237,6 @@ impl ModUpdaterApp {
 
         // Load Profiles and Memory
         let profiles_db = load_profiles();
-        let memory = load_memory();
 
         // --- Background Cache Cleanup ---
         thread::spawn(|| {
@@ -263,7 +261,6 @@ impl ModUpdaterApp {
             status_msg: String::new(),
             current_tab: AppTab::Explorer,
             profiles_db,
-            memory,
             selected_profile_name: None,
             profile_mods_pending_deletion: HashSet::new(),
 
@@ -489,13 +486,8 @@ impl ModUpdaterApp {
                                         .color(tui_theme::TEXT_DIM)
                                         .size(11.0));
                                 }
-                                
-                                if let Some(issue) = self.memory.check(&m.name) {
-                                    ui.label(egui::RichText::new("[!]")
-                                        .family(egui::FontFamily::Monospace)
-                                        .color(tui_theme::WARNING))
-                                        .on_hover_text(format!("Problema: {}\nFix: {:?}", issue.issue_description, issue.fix));
-                                }
+
+
                             });
 
                             if let Some(deps) = &m.depends {
@@ -927,13 +919,6 @@ impl eframe::App for ModUpdaterApp {
         if let Some(name_rc) = &self.download_confirmation_name.clone() {
             let mut name = name_rc.clone();
             let mut open = true;
-            // ... (rest of download modal logic, just anchoring next modal after this block)
-            // Note: Since I can't see the end of the download modal in the previous view, I will append the NEW modal at the end of the update loop, 
-            // but I need to be careful about where I insert it.
-            // Actually, I'll insert it right before the download confirmation modal or after it. 
-            // The previous view_file didn't show the end of the download confirmation modal.
-            // I will use a different anchor.
-
             let mut close_requested = false;
 
             egui::Window::new("DESCARGA")

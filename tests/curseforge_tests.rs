@@ -1,8 +1,7 @@
-use mods_updater::fetch::fetch_from_api;
+use mods_updater::fetch::curseforge_api;
 use std::env;
 
 // Helper to ensure we have an API key for testing. 
-// If not present, we skip the test to avoid false negatives in CI/local runs without keys.
 fn get_api_key() -> Option<String> {
     env::var("CURSEFORGE_API_KEY").ok().filter(|k| !k.is_empty())
 }
@@ -18,9 +17,8 @@ fn test_search_basic() {
     };
 
     // Buscamos "JEI", un mod muy común
-    let results = fetch_from_api::search_curseforge("JEI", &api_key, &None, &None, 0, 5);
+    let results = curseforge_api::search_curseforge("JEI", &api_key, &None, &None, 0, 5);
     
-    // Verificaciones
     assert!(!results.is_empty(), "Should return at least one result for 'JEI'");
     
     let found = results.iter().any(|m| m.name.contains("JEI") || m.name.contains("Just Enough Items"));
@@ -37,15 +35,12 @@ fn test_search_with_filters() {
         }
     };
 
-    // Buscamos "Fabric API" para la version 1.20.1 y Loader Fabric
     let loader = Some("Fabric".to_string());
     let version = Some("1.20.1".to_string());
     
-    let results = fetch_from_api::search_curseforge("Fabric API", &api_key, &loader, &version, 0, 5);
+    let results = curseforge_api::search_curseforge("Fabric API", &api_key, &loader, &version, 0, 5);
 
     assert!(!results.is_empty(), "Should return results for Fabric API 1.20.1");
-    // Es difícil verificar programáticamente si *realmente* es de Fabric sin hacer más llamadas,
-    // pero al menos verificamos que la API no devuelva error y traiga algo relevante.
     assert!(results[0].name.contains("Fabric"), "First result should likely contain 'Fabric'");
 }
 
@@ -59,8 +54,7 @@ fn test_search_no_results() {
         }
     };
 
-    // Búsqueda absurda
-    let results = fetch_from_api::search_curseforge("sdlfkjhsldkfjhsdlkfjh", &api_key, &None, &None, 0, 5);
+    let results = curseforge_api::search_curseforge("sdlfkjhsldkfjhsdlkfjh", &api_key, &None, &None, 0, 5);
     assert!(results.is_empty(), "Should return no results for random garbage string");
 }
 
@@ -74,9 +68,8 @@ fn test_fetch_project_id() {
         }
     };
 
-    let id = fetch_from_api::fetch_curseforge_project_id("Just Enough Items (JEI)", &api_key);
+    let id = curseforge_api::fetch_curseforge_project_id("Just Enough Items (JEI)", &api_key);
     assert!(id.is_some(), "Should resolve ID for JEI");
-    // JEI ID conocido es 238222, pero podría cambiar o ser otro fork, pero verificamos que sea un ID válido
     assert!(id.unwrap() > 0);
 }
 
@@ -91,8 +84,7 @@ fn test_fetch_version_file() {
     };
 
     // JEI ID: 238222
-    // Intentamos buscar una version específica
-    let file = fetch_from_api::fetch_curseforge_version_file(
+    let file = curseforge_api::fetch_curseforge_version_file(
         238222, 
         "1.20.1", 
         "Forge", 
@@ -115,9 +107,7 @@ fn test_fetch_file_invalid_params() {
         }
     };
 
-    // JEI ID: 238222
-    // Versión inexistente para Minecraft
-    let file = fetch_from_api::fetch_curseforge_version_file(
+    let file = curseforge_api::fetch_curseforge_version_file(
         238222, 
         "0.0.1-beta-alpha-omega", 
         "Forge", 
@@ -129,8 +119,26 @@ fn test_fetch_file_invalid_params() {
 
 #[test]
 fn test_invalid_api_key() {
-    // Probamos explícitamente con una key mala
-    let results = fetch_from_api::search_curseforge("JEI", "INVALID_KEY_12345", &None, &None, 0, 5);
-    // Nuestra implementación actual devuelve vec![] en caso de error, y loguea a stdout.
+    let results = curseforge_api::search_curseforge("JEI", "INVALID_KEY_12345", &None, &None, 0, 5);
     assert!(results.is_empty(), "Should return empty results with invalid API key");
+}
+
+#[test]
+fn test_curseforge_has_capacity() {
+    // Token bucket empieza lleno, debería tener capacidad
+    assert!(curseforge_api::has_capacity(), "Should have capacity at startup");
+}
+
+#[test]
+fn test_curseforge_is_available_without_key() {
+    // Sin la variable de entorno CURSEFORGE_API_KEY, is_available() debería devolver false
+    // (a menos que esté configurada en el entorno de test)
+    let has_key = env::var("CURSEFORGE_API_KEY").is_ok_and(|k| !k.is_empty());
+    let available = curseforge_api::is_available();
+    
+    if has_key {
+        assert!(available, "Should be available when API key is set");
+    } else {
+        assert!(!available, "Should NOT be available without API key");
+    }
 }

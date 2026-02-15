@@ -18,14 +18,6 @@ pub struct ModInfo {
     pub depends: Option<std::collections::HashMap<String, String>>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct FabricModJson {
-    pub id: String,
-    pub name: String,
-    pub version: Option<String>,
-    pub depends: Option<std::collections::HashMap<String, serde_json::Value>>,
-}
-
 /// Estructuras para parsear el manifest de versiones de Minecraft
 #[derive(Deserialize, Debug)]
 pub struct VersionInfo {

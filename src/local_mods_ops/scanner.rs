@@ -1,11 +1,11 @@
 use crate::paths_vars::PATHS;
-use super::models::{ModInfo, FabricModJson, VersionManifest};
+use super::models::{ModInfo, VersionManifest};
 use indexmap::IndexMap;
 use std::fs::{self, File};
-use std::io::Read;
 use std::path::Path;
 use zip::ZipArchive;
 use std::time::SystemTime;
+use super::parsers;
 
 pub fn get_file_mtime(metadata: &fs::Metadata) -> u64 {
     metadata.modified()
@@ -20,7 +20,6 @@ pub fn read_mods_in_folder(mods_folder: &str) -> IndexMap<String, ModInfo> {
 
     if let Ok(entries) = fs::read_dir(mods_folder) {
         let mut entries_vec: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-        // Sort by filename to ensure consistent order
         entries_vec.sort_by_key(|e| e.file_name());
 
         for entry in entries_vec {
@@ -28,18 +27,15 @@ pub fn read_mods_in_folder(mods_folder: &str) -> IndexMap<String, ModInfo> {
             if path.extension().and_then(|s| s.to_str()) == Some("jar") {
                 let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
                 
-                // Get Metadata
                 let (file_size, file_mtime) = if let Ok(meta) = fs::metadata(&path) {
                     (meta.len(), get_file_mtime(&meta))
                 } else {
                     (0, 0)
                 };
 
-                // Check Cache (Redb)
                 let cached = crate::local_mods_ops::cache::get_mod(&filename);
                 let mut use_cache = false;
                 if let Some(ref c) = cached {
-                     // Verify integrity
                     if c.file_size_bytes == Some(file_size) && c.file_mtime_secs == Some(file_mtime) {
                         mods_map.insert(c.key.clone(), c.clone());
                         use_cache = true;
@@ -48,11 +44,9 @@ pub fn read_mods_in_folder(mods_folder: &str) -> IndexMap<String, ModInfo> {
 
                 if !use_cache {
                     if let Ok(mut mod_info) = read_single_mod(&path) {
-                        // Update metadata
                         mod_info.file_size_bytes = Some(file_size);
                         mod_info.file_mtime_secs = Some(file_mtime);
                         
-                        // Reusar la lectura anterior para preservar info remota
                         if let Some(old) = &cached {
                             if old.key == mod_info.key {
                                 mod_info.confirmed_project_id = old.confirmed_project_id.clone();
@@ -61,76 +55,22 @@ pub fn read_mods_in_folder(mods_folder: &str) -> IndexMap<String, ModInfo> {
                             }
                         }
 
-                        // Update output
                         mods_map.insert(mod_info.key.clone(), mod_info.clone());
-                        
-                        // Update Cache (Redb)
                         crate::local_mods_ops::cache::upsert_mod(&filename, &mod_info); 
                     } 
                 }
             }        
         }
-    }
-    
+    } 
     return mods_map;
 }
 
 pub fn read_single_mod(path: &Path) -> Result<ModInfo, String> {
     let file = File::open(path).map_err(|_| "No se pudo abrir archivo".to_string())?;
-    
     let mut zip = ZipArchive::new(file).map_err(|_| "No es un ZIP válido".to_string())?;
 
-    // Buscamos fabric.mod.json dentro del .jar
-    let mut mod_json_str = String::new();
-    let mut found = false;
-    for i in 0..zip.len() {
-        if let Ok(mut file) = zip.by_index(i) {
-            if Path::new(file.name()).file_name().and_then(|s| s.to_str()) == Some("fabric.mod.json") {
-                if file.read_to_string(&mut mod_json_str).is_ok() {
-                    found = true;
-                    break;
-                }
-            }
-        }
-    }
-
-    if !found || mod_json_str.is_empty() {
-        return Err("No se encontró fabric.mod.json".to_string());
-    }
-
-    let mod_json: FabricModJson = serde_json::from_str(&mod_json_str)
-        .map_err(|_| "Error parseando fabric.mod.json".to_string())?;
-
-    let key = path.file_name().and_then(|s| s.to_str()).unwrap_or(&mod_json.name).to_string();
-
-    let depends = mod_json.depends.map(|deps| {
-        deps.into_iter().filter_map(|(k, v)| {
-            match v {
-                serde_json::Value::String(s) => Some((k, s)),
-                serde_json::Value::Array(arr) => {
-                     let s = arr.iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect::<Vec<_>>()
-                        .join(" || "); // approximation
-                     if s.is_empty() { None } else { Some((k, s)) }
-                },
-                _ => None,
-            }
-        }).collect()
-    });
-
-    Ok(ModInfo {
-        key: key.clone(),
-        name: mod_json.name,
-        detected_project_id: Some(mod_json.id),
-        confirmed_project_id: None,
-        version_local: mod_json.version,
-        version_remote: None,
-        selected: true,
-        file_size_bytes: None,
-        file_mtime_secs: None,
-        depends,
-    })
+    parsers::try_all(&mut zip, path)
+        .ok_or_else(|| "No se encontró metadata del mod (ni fabric.mod.json ni META-INF/mods.toml)".to_string())
 }
 
 pub fn get_minecraft_versions(manifest_path: &str) -> Vec<String> {

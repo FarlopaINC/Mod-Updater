@@ -273,6 +273,8 @@ impl ModUpdaterApp {
                 "Forge".to_string(), 
                 "NeoForge".to_string(),
                 "Quilt".to_string(),
+                "LiteLoader".to_string(),
+                "Cauldron".to_string(),
             ],
             selected_loader: "Fabric".to_string(),
 

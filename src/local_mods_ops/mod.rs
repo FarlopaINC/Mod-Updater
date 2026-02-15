@@ -3,6 +3,7 @@ pub mod scanner;
 pub mod fs_ops;
 pub mod async_reader;
 pub mod cache;
+pub mod parsers;
 
 pub use models::*;
 pub use scanner::*;

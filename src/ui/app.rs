@@ -6,11 +6,12 @@ use crossbeam_channel::{unbounded, Sender, Receiver};
 use std::thread;
 use indexmap::IndexMap;
 
-use crate::manage_mods::{
+use crate::local_mods_ops::{
     change_mods, list_modpacks, get_minecraft_versions, read_active_marker,
     spawn_read_workers, ReadJob, ReadEvent,
-    ModInfo, ProfilesDatabase, TroubleshootMemory, load_profiles, save_profiles, load_memory, Profile,
+    ModInfo, TroubleshootMemory, load_memory,
 };
+use crate::profiles::{ProfilesDatabase, Profile, load_profiles, save_profiles};
 use crate::fetch::async_download::{spawn_workers, DownloadJob, DownloadEvent};
 use crate::fetch::single_mod_search::{UnifiedSearchResult, search_unified, SearchRequest};
 use crate::paths_vars::PATHS;
@@ -160,7 +161,7 @@ impl ModUpdaterApp {
         tui_theme::apply_tui_theme(&_cc.egui_ctx);
 
         // Detect active modpack first to use in logic
-        let active_modpack = crate::manage_mods::fs_ops::read_active_marker();
+        let active_modpack = crate::local_mods_ops::fs_ops::read_active_marker();
 
         let mc_versions = get_minecraft_versions(&PATHS.versions_folder
             .join("version_manifest_V2.json")
@@ -192,11 +193,11 @@ impl ModUpdaterApp {
                     if path.extension().and_then(|s| s.to_str()) == Some("jar") {
                         let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
                         let (file_size, file_mtime) = if let Ok(meta) = std::fs::metadata(&path) {
-                            (meta.len(), crate::manage_mods::scanner::get_file_mtime(&meta))
+                            (meta.len(), crate::local_mods_ops::scanner::get_file_mtime(&meta))
                         } else { (0, 0) };
 
                         let mut loaded = false;
-                        if let Some(cached) = crate::manage_mods::cache::get_mod(&filename) {
+                        if let Some(cached) = crate::local_mods_ops::cache::get_mod(&filename) {
                             if cached.file_size_bytes == Some(file_size) && cached.file_mtime_secs == Some(file_mtime) {
                                 ui_mods.insert(cached.key.clone(), UiModInfo::from(cached));
                                 loaded = true;
@@ -243,7 +244,7 @@ impl ModUpdaterApp {
         thread::spawn(|| {
             // Wait a bit to let the app load critical stuff first
             thread::sleep(std::time::Duration::from_secs(5));
-            crate::manage_mods::cache::clean_cache();
+            crate::local_mods_ops::cache::clean_cache();
         });
 
         return Self { 
@@ -797,7 +798,7 @@ impl eframe::App for ModUpdaterApp {
                         m.inner.confirmed_project_id = confirmed_project_id.clone();
                         m.inner.version_remote = version_remote.clone();
                         // Save cache (Redb Update)
-                        crate::manage_mods::cache::update_remote_info(&key, confirmed_project_id, version_remote);
+                        crate::local_mods_ops::cache::update_remote_info(&key, confirmed_project_id, version_remote);
                     }
                 }
                 DownloadEvent::Done { key } => {
@@ -1290,7 +1291,7 @@ impl ModUpdaterApp {
                                                 if tui_button_c(ui, "DL", tui_theme::NEON_YELLOW).clicked() {
                                                     // Trigger Download
                                                     // Construct ModInfo
-                                                    let mod_info = crate::manage_mods::ModInfo {
+                                                    let mod_info = crate::local_mods_ops::ModInfo {
                                                         key: res.name.clone(), 
                                                         name: res.name.clone(),
                                                         detected_project_id: res.modrinth_id.clone().or_else(|| Some(res.slug.clone())),
@@ -1307,7 +1308,7 @@ impl ModUpdaterApp {
                                                     let output_folder_path = if let Some(mp) = &self.selected_modpack_ui {
                                                         PATHS.modpacks_folder.join(mp)
                                                     } else {
-                                                        crate::manage_mods::prepare_output_folder(&self.selected_mc_version);
+                                                        crate::local_mods_ops::prepare_output_folder(&self.selected_mc_version);
                                                         PATHS.modpacks_folder.join(format!(r"mods{}", self.selected_mc_version))
                                                     };
                                                     let _ = std::fs::create_dir_all(&output_folder_path);
@@ -1330,7 +1331,7 @@ impl ModUpdaterApp {
                                             if tui_button_c(ui, "ADD", tui_theme::NEON_GREEN).clicked() {
                                                 if let Some(profile) = self.profiles_db.get_profile_mut(p_name) {
                                                     // Add to profile
-                                                    let mod_info = crate::manage_mods::ModInfo {
+                                                    let mod_info = crate::local_mods_ops::ModInfo {
                                                     key: res.name.clone(),
                                                     name: res.name.clone(),
                                                     detected_project_id: res.modrinth_id.clone(),

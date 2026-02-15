@@ -1,6 +1,6 @@
 use indexmap::IndexMap;
 use serde::{Serialize, Deserialize};
-use super::models::ModInfo;
+use crate::local_mods_ops::ModInfo;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};

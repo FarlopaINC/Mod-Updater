@@ -2,7 +2,7 @@ use crossbeam_channel::{Sender, Receiver};
 use std::thread;
 use std::sync::Arc;
 use std::path::PathBuf;
-use crate::manage_mods::{ModInfo, read_single_mod};
+use crate::local_mods_ops::{ModInfo, read_single_mod};
 
 #[derive(Debug, Clone)]
 pub struct ReadJob {
@@ -27,7 +27,7 @@ pub fn spawn_read_workers(n: usize, rx: Receiver<ReadJob>, tx: Sender<ReadEvent>
                         // Persist to cache (Background thread, safe to block)
                         // Key should match filename
                         let filename = job.file_path.file_name().unwrap_or_default().to_string_lossy().to_string();
-                        crate::manage_mods::cache::upsert_mod(&filename, &info);
+                        crate::local_mods_ops::cache::upsert_mod(&filename, &info);
                         let _ = tx.send(ReadEvent::Done { info });
                     }
                     Err(e) => {

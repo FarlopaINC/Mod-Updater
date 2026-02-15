@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::fs;
 use std::sync::OnceLock;
 use crate::paths_vars::PATHS;
-use crate::manage_mods::models::{ModInfo, CachedFile, CachedProject};
+use crate::local_mods_ops::models::{ModInfo, CachedFile, CachedProject};
 
 // Define tables
 // FILES: filename (String) -> serialized CachedFile (JSON String)

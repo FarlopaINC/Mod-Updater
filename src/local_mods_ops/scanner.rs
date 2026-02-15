@@ -36,7 +36,7 @@ pub fn read_mods_in_folder(mods_folder: &str) -> IndexMap<String, ModInfo> {
                 };
 
                 // Check Cache (Redb)
-                let cached = crate::manage_mods::cache::get_mod(&filename);
+                let cached = crate::local_mods_ops::cache::get_mod(&filename);
                 let mut use_cache = false;
                 if let Some(ref c) = cached {
                      // Verify integrity
@@ -65,7 +65,7 @@ pub fn read_mods_in_folder(mods_folder: &str) -> IndexMap<String, ModInfo> {
                         mods_map.insert(mod_info.key.clone(), mod_info.clone());
                         
                         // Update Cache (Redb)
-                        crate::manage_mods::cache::upsert_mod(&filename, &mod_info); 
+                        crate::local_mods_ops::cache::upsert_mod(&filename, &mod_info); 
                     } 
                 }
             }        

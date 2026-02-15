@@ -2,7 +2,7 @@ use crossbeam_channel::{Sender, Receiver};
 use std::thread;
 use std::sync::Arc;
 use std::env;
-use crate::manage_mods::ModInfo;
+use crate::local_mods_ops::ModInfo;
 use super::fetch_from_api;
 
 
@@ -46,7 +46,7 @@ pub fn spawn_workers(n: usize, rx: Receiver<DownloadJob>, tx_events: Sender<Down
                     .or_else(|| {
                         // Cache miss por filename — buscar en tabla PROJECTS directamente
                         mi.detected_project_id.as_deref()
-                            .and_then(crate::manage_mods::cache::get_confirmed_id)
+                            .and_then(crate::local_mods_ops::cache::get_confirmed_id)
                     })
                     .or(mi.detected_project_id.clone());
 

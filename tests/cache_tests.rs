@@ -1,8 +1,8 @@
 
 #[cfg(test)]
 mod tests {
-    use mods_updater::manage_mods::cache::{upsert_mod, get_mod, update_remote_info, prune_db, init_with_path};
-    use mods_updater::manage_mods::ModInfo;
+    use mods_updater::local_mods_ops::cache::{upsert_mod, get_mod, update_remote_info, prune_db, init_with_path};
+    use mods_updater::local_mods_ops::ModInfo;
     use std::fs;
 
     fn setup_test_db(name: &str) -> std::path::PathBuf {

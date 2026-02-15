@@ -5,13 +5,13 @@ use mods_updater::ui::app::ModUpdaterApp;
 
 fn main() {
     // Inicializar DB (Redb)
-    if !mods_updater::manage_mods::cache::init() {
+    if !mods_updater::local_mods_ops::cache::init() {
         eprintln!("⚠️ Caché deshabilitada: la app funcionará sin caché (más lento).");
     }
 
     // Limpiar descargas parciales (.part) en hilo separado
     std::thread::spawn(|| {
-        mods_updater::manage_mods::fs_ops::cleanup_partial_downloads();
+        mods_updater::local_mods_ops::fs_ops::cleanup_partial_downloads();
     });
 
     let options = eframe::NativeOptions::default();

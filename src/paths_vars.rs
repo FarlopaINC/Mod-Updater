@@ -15,6 +15,7 @@ pub struct Paths {
     pub mods_folder: PathBuf,
     pub versions_folder: PathBuf,
     pub modpacks_folder: PathBuf,
+    pub saves_folder: PathBuf,
 }
 
 impl Paths {
@@ -23,6 +24,7 @@ impl Paths {
             mods_folder: base_game_path.join("mods"),
             versions_folder: base_game_path.join("versions"),
             modpacks_folder: base_game_path.join("modpacks"),
+            saves_folder: base_game_path.join("saves"),
             base_game_folder: base_game_path,
         }
     }

@@ -1,11 +1,11 @@
-use crate::paths_vars::PATHS;
-use super::models::{ModInfo, VersionManifest};
 use indexmap::IndexMap;
 use std::fs::{self, File};
 use std::path::Path;
 use zip::ZipArchive;
 use std::time::SystemTime;
+use crate::paths_vars::PATHS;
 use super::parsers;
+use super::models::{ModInfo, VersionManifest};
 
 pub fn get_file_mtime(metadata: &fs::Metadata) -> u64 {
     metadata.modified()

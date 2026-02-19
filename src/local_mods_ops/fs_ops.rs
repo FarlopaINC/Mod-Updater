@@ -21,8 +21,6 @@ pub fn prepare_output_folder(version: &str) {
     } 
 }   
 
-
-
 pub fn change_mods(modpack: &str) -> Result<String, String> {
     let target = &PATHS.mods_folder;
     let source = &PATHS.modpacks_folder.join(modpack);

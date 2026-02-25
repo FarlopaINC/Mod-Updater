@@ -28,6 +28,20 @@ impl Profile {
             mods: IndexMap::new(),
         }
     }
+
+    /// Devuelve `true` si el perfil ya contiene el mod indicado.
+    /// Comprueba por filename (clave exacta), por project_id numérico y por slug
+    /// (los mods escaneados del disco almacenan el slug en `detected_project_id`).
+    pub fn contains_mod(&self, filename: &str, project_id: &str, slug: &str) -> bool {
+        self.mods.contains_key(filename)
+            || self.mods.values().any(|m| {
+                m.confirmed_project_id.as_deref() == Some(project_id)
+                    || m.detected_project_id.as_deref() == Some(project_id)
+                    || (!slug.is_empty()
+                        && (m.detected_project_id.as_deref() == Some(slug)
+                            || m.confirmed_project_id.as_deref() == Some(slug)))
+            })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

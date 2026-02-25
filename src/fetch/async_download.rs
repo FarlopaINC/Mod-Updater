@@ -1,10 +1,8 @@
 use crossbeam_channel::{Sender, Receiver};
-use std::thread;
 use std::sync::Arc;
-use std::env;
 use crate::local_mods_ops::ModInfo;
-use super::fetch_from_api;
-
+use crate::fetch::fetch_from_api;
+use crate::common::spawn_worker_pool;
 
 #[derive(Debug, Clone)]
 pub enum DownloadEvent {
@@ -28,56 +26,42 @@ pub struct DownloadJob {
 
 pub fn spawn_workers(n: usize, rx: Receiver<DownloadJob>, tx_events: Sender<DownloadEvent>) {
     let tx_events = Arc::new(tx_events);
-    for _ in 0..n {
-        let rx = rx.clone();
+
+    spawn_worker_pool(n, rx, move |job: DownloadJob| {
         let tx = tx_events.clone();
-        thread::spawn(move || {
-            while let Ok(job) = rx.recv() {
-                let key = job.key.clone();
-                let mi = job.modinfo.clone();
-                // Use the unified fetch API (Modrinth primary, CurseForge fallback)
-                let _ = tx.send(DownloadEvent::Resolving { key: key.clone() });
+        let key = job.key.clone();
+        let mi = job.modinfo.clone();
 
-                // Get CurseForge API key from env if present (optional)
-                let cf_key = env::var("CURSEFORGE_API_KEY").unwrap_or_default();
+        let _ = tx.send(DownloadEvent::Resolving { key: key.clone() });
 
-                // Resolver el ID del proyecto: confirmed > cache lookup > detected
-                let resolved_id: Option<String> = mi.confirmed_project_id.clone()
-                    .or_else(|| {
-                        // Cache miss por filename — buscar en tabla PROJECTS directamente
-                        mi.detected_project_id.as_deref()
-                            .and_then(crate::local_mods_ops::cache::get_confirmed_id)
-                    })
-                    .or(mi.detected_project_id.clone());
+        let cf_key = crate::fetch::cf_api_key();
 
-                match fetch_from_api::find_mod_download(&mi.name, resolved_id.as_deref(), &job.selected_version, &job.selected_loader, &cf_key) {
-                     Some(info) => {
-                        let confirmed_project_id = Some(info.project_id.clone());
-                        let version_remote = Some(info.version_remote.clone());
+        // Resolver el ID del proyecto: confirmed > cache lookup > detected
+        let resolved_id: Option<String> = mi.confirmed_project_id.clone()
+            .or_else(|| {
+                mi.detected_project_id.as_deref()
+                    .and_then(crate::local_mods_ops::cache::get_confirmed_id)
+            })
+            .or(mi.detected_project_id.clone());
 
-                        let _ = tx.send(DownloadEvent::Resolved { key: key.clone() });
-                        let _ = tx.send(DownloadEvent::ResolvedInfo { key: key.clone(), confirmed_project_id, version_remote });
-                        let _ = tx.send(DownloadEvent::Started { key: key.clone() });
+        match fetch_from_api::find_mod_download(&mi.name, resolved_id.as_deref(), &job.selected_version, &job.selected_loader, &cf_key) {
+            Some(info) => {
+                let confirmed_project_id = Some(info.project_id.clone());
+                let version_remote = Some(info.version_remote.clone());
 
-                        // download file
-                        let res = fetch_from_api::download_mod_file(&info.url, &job.output_folder, &info.filename);
-                        match res {
-                            Ok(_) => {
-                                let _ = tx.send(DownloadEvent::Done { key: key.clone() });
-                            }
-                            Err(e) => {
-                                let _ = tx.send(DownloadEvent::Error { key: key.clone(), msg: format!("[ERROR]: Fallo descargando: {}", e) });
-                            }
-                        }
-                    }
-                    None => {
-                        let _ = tx.send(DownloadEvent::Error { key: key.clone(), msg: format!("[ERROR]: No se encontró v{} ", job.selected_version) });
-                    }
+                let _ = tx.send(DownloadEvent::Resolved { key: key.clone() });
+                let _ = tx.send(DownloadEvent::ResolvedInfo { key: key.clone(), confirmed_project_id, version_remote });
+                let _ = tx.send(DownloadEvent::Started { key: key.clone() });
+
+                let res = fetch_from_api::download_mod_file(&info.url, &job.output_folder, &info.filename);
+                match res {
+                    Ok(_) => { let _ = tx.send(DownloadEvent::Done { key: key.clone() }); }
+                    Err(e) => { let _ = tx.send(DownloadEvent::Error { key: key.clone(), msg: format!("[ERROR]: Fallo descargando: {}", e) }); }
                 }
             }
-        });
-    }
+            None => {
+                let _ = tx.send(DownloadEvent::Error { key: key.clone(), msg: format!("[ERROR]: No se encontró v{} ", job.selected_version) });
+            }
+        }
+    });
 }
-
-
-

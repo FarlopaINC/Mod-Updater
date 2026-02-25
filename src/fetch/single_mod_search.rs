@@ -1,5 +1,4 @@
 use super::{modrinth_api, curseforge_api};
-use std::env;
 
 #[derive(Debug, Clone)]
 pub struct UnifiedSearchResult {
@@ -12,6 +11,10 @@ pub struct UnifiedSearchResult {
     // Source specific info to allow downloading/linking
     pub modrinth_id: Option<String>,
     pub curseforge_id: Option<u32>,
+    
+    // UI Dependency Viewer
+    pub dependencies: Option<Vec<String>>,
+    pub fetching_dependencies: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -37,11 +40,13 @@ pub fn search_unified(req: &SearchRequest) -> Vec<UnifiedSearchResult> {
             author: hit.author,
             modrinth_id: Some(hit.project_id),
             curseforge_id: None,
+            dependencies: None,
+            fetching_dependencies: false,
         });
     }
 
     // 2. CurseForge Search
-    let cf_key = env::var("CURSEFORGE_API_KEY").unwrap_or_default();
+    let cf_key = crate::fetch::cf_api_key();
     if !cf_key.is_empty() {
         let curse_hits = curseforge_api::search_curseforge(&req.query, &cf_key, &req.loader, &req.version, req.offset, req.limit);
         for hit in curse_hits {
@@ -64,6 +69,8 @@ pub fn search_unified(req: &SearchRequest) -> Vec<UnifiedSearchResult> {
                     author: "Unknown (CF)".to_string(), // CF search doesn't easily give author in summary, typically in 'authors' array which we didn't fully map yet or trivial to get
                     modrinth_id: None,
                     curseforge_id: Some(hit.id),
+                    dependencies: None,
+                    fetching_dependencies: false,
                 });
             }
         }

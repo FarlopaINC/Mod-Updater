@@ -1,9 +1,9 @@
 use serde::Deserialize;
-use std::io::Read;
 use std::path::Path;
 use zip::ZipArchive;
 use std::fs::File;
 use crate::local_mods_ops::ModInfo;
+use super::read_zip_entry;
 
 // ── Deserialización de META-INF/mods.toml (Forge / NeoForge) ─
 
@@ -26,23 +26,7 @@ struct ForgeModEntry {
 // ── Parser ───────────────────────────────────────────────────
 
 pub fn try_parse(zip: &mut ZipArchive<File>, path: &Path) -> Option<ModInfo> {
-    // Buscar META-INF/mods.toml
-    let mut toml_str = String::new();
-    for i in 0..zip.len() {
-        if let Ok(mut file) = zip.by_index(i) {
-            let name = file.name().replace('\\', "/");
-            if name == "META-INF/mods.toml" {
-                if file.read_to_string(&mut toml_str).is_ok() {
-                    break;
-                }
-            }
-        }
-    }
-
-    if toml_str.is_empty() {
-        return None;
-    }
-
+    let toml_str = read_zip_entry(zip, "META-INF/mods.toml")?;
     let mod_toml: ForgeModToml = toml::from_str(&toml_str).ok()?;
     let entry = mod_toml.mods.first()?;
 

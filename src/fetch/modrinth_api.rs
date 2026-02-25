@@ -11,11 +11,32 @@ pub struct ModrinthVersion {
     pub files: Vec<ModFile>,
     pub game_versions: Vec<String>,
     pub loaders: Vec<String>,
+    pub dependencies: Option<Vec<ModrinthDependency>>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ModrinthDependency {
+    pub project_id: Option<String>,
+    pub dependency_type: String,
 }
 
 impl ModrinthVersion {
     pub fn first_file(&self) -> Option<&ModFile> {
         self.files.first()
+    }
+
+    /// Devuelve las dependencias **requeridas** como Vec<UnifiedDependency>.
+    /// Centraliza la extracción para que no se repita en fetch_from_api.
+    pub fn required_deps(&self) -> Vec<crate::fetch::fetch_from_api::UnifiedDependency> {
+        self.dependencies.as_ref()
+            .map(|deps| {
+                deps.iter()
+                    .filter(|d| d.dependency_type == "required")
+                    .filter_map(|d| d.project_id.clone())
+                    .map(|id| crate::fetch::fetch_from_api::UnifiedDependency { mod_id: id })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -155,6 +176,30 @@ pub fn search_modrinth_project(query: &str, loader: &Option<String>, version: &O
         }
     }
     return vec![];
+}
+
+/// Fetches the human-readable title and slug of a Modrinth project by its ID or slug.
+/// Used when we resolve a dependency by direct ID and have no search hit to pull the title from.
+pub fn fetch_modrinth_project_info(mod_id: &str) -> Option<(String, String)> {
+    #[derive(Deserialize)]
+    struct ProjectInfo { title: String, slug: String }
+
+    let client = &*MODRINTH_CLIENT;
+    let api_url = format!("https://api.modrinth.com/v2/project/{}", mod_id);
+
+    wait_for_ratelimit();
+
+    match client.get(&api_url).send() {
+        Ok(resp) => {
+            update_ratelimit(resp.headers());
+            if resp.status().is_success() {
+                resp.json::<ProjectInfo>().ok().map(|p| (p.title, p.slug))
+            } else {
+                None
+            }
+        }
+        Err(_) => None,
+    }
 }
 
 pub fn fetch_modrinth_version(mod_id: &str, version: &str, loader: &str) -> Option<ModrinthVersion> {

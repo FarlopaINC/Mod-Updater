@@ -18,6 +18,38 @@ pub struct ModInfo {
     pub depends: Option<std::collections::HashMap<String, String>>,
 }
 
+impl ModInfo {
+    /// Mod añadido manualmente desde búsqueda (botón ADD en perfil).
+    /// `key` y `name` son el título del proyecto; `project_id` es el ID de Modrinth/CurseForge.
+    pub fn from_search(name: String, project_id: Option<String>) -> Self {
+        Self {
+            key: name.clone(),
+            name,
+            detected_project_id: project_id.clone(),
+            confirmed_project_id: project_id,
+            version_local: Some("Universal".to_string()),
+            selected: true,
+            ..Default::default()
+        }
+    }
+
+    /// Dependencia resuelta automáticamente por el BFS.
+    /// `filename` es la clave del IndexMap; `slug` se almacena como `detected_project_id`
+    /// para que el dedup pueda compararlo contra mods escaneados del disco.
+    pub fn from_dep(filename: String, name: String, project_id: String, slug: String) -> Self {
+        Self {
+            key: filename.clone(),
+            name,
+            detected_project_id: Some(slug),
+            confirmed_project_id: Some(project_id),
+            version_local: Some("Universal".to_string()),
+            selected: true,
+            ..Default::default()
+        }
+    }
+}
+
+
 /// Estructuras para parsear el manifest de versiones de Minecraft
 #[derive(Deserialize, Debug)]
 pub struct VersionInfo {

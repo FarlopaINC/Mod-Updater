@@ -143,10 +143,14 @@ pub fn upsert_mod(filename: &str, info: &ModInfo) {
 }
 
 pub fn update_remote_info(filename: &str, project_id: Option<String>, version_remote: Option<String>) {
+    update_remote_info_with_deps(filename, project_id, version_remote, None);
+}
+
+pub fn update_remote_info_with_deps(filename: &str, project_id: Option<String>, version_remote: Option<String>, dependencies: Option<Vec<crate::fetch::fetch_from_api::UnifiedDependency>>) {
     let Some(db) = db() else { return };
     let Ok(write_txn) = db.begin_write() else { return };
     {
-        let table_files = match write_txn.open_table(TABLE_FILES) {
+        let mut table_files = match write_txn.open_table(TABLE_FILES) {
             Ok(t) => t,
             Err(_) => return,
         };
@@ -156,12 +160,13 @@ pub fn update_remote_info(filename: &str, project_id: Option<String>, version_re
         };
 
         // 1. Find the project ref for this file
-        let project_ref = if let Ok(Some(access)) = table_files.get(filename) {
-            serde_json::from_str::<CachedFile>(access.value()).ok().map(|f| f.project_ref)
+        let existing_file = if let Ok(Some(access)) = table_files.get(filename) {
+            serde_json::from_str::<CachedFile>(access.value()).ok()
         } else { None };
 
         // 2. Update the project
-        if let Some(p_ref) = project_ref {
+        if let Some(ref file) = existing_file {
+            let p_ref = &file.project_ref;
             let new_json = if let Ok(Some(access)) = table_projects.get(p_ref.as_str()) {
                 if let Ok(mut proj) = serde_json::from_str::<CachedProject>(access.value()) {
                     proj.confirmed_project_id = project_id;
@@ -172,6 +177,19 @@ pub fn update_remote_info(filename: &str, project_id: Option<String>, version_re
 
             if let Some(json) = new_json {
                 let _ = table_projects.insert(p_ref.as_str(), json.as_str());
+            }
+        }
+        // 3. Update the file info with dependencies
+        if let Some(deps) = dependencies {
+            if let Some(mut file) = existing_file {
+                let mut dep_map = std::collections::HashMap::new();
+                for d in deps {
+                    dep_map.insert(d.mod_id.clone(), "required".to_string());
+                }
+                file.depends = Some(dep_map);
+                if let Ok(json) = serde_json::to_string(&file) {
+                    let _ = table_files.insert(filename, json.as_str());
+                }
             }
         }
     }

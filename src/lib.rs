@@ -1,3 +1,4 @@
+pub mod common;
 pub mod local_mods_ops;
 pub mod local_datapacks_ops;
 pub mod profiles;

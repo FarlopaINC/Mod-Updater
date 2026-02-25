@@ -39,7 +39,16 @@ pub struct CurseFile {
     pub download_url: Option<String>,
     pub game_versions: Vec<String>,
     pub mod_loaders: Vec<String>,
+    pub dependencies: Option<Vec<CurseDependency>>,
 }
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CurseDependency {
+    pub mod_id: u32,
+    pub relation_type: u32,
+}
+
 
 // ── Rate Limiting (Token Bucket) ─────────────────────────────
 

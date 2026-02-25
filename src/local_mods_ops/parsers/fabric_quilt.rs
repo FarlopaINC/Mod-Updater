@@ -1,9 +1,9 @@
 use serde::Deserialize;
-use std::io::Read;
 use std::path::Path;
 use zip::ZipArchive;
 use std::fs::File;
 use crate::local_mods_ops::ModInfo;
+use super::read_zip_entry;
 
 // ── Deserialización de fabric.mod.json (Fabric / Quilt) ──────
 
@@ -18,22 +18,7 @@ struct FabricModJson {
 // ── Parser ───────────────────────────────────────────────────
 
 pub fn try_parse(zip: &mut ZipArchive<File>, path: &Path) -> Option<ModInfo> {
-    // Buscar fabric.mod.json (raíz del JAR)
-    let mut json_str = String::new();
-    for i in 0..zip.len() {
-        if let Ok(mut file) = zip.by_index(i) {
-            if Path::new(file.name()).file_name().and_then(|s| s.to_str()) == Some("fabric.mod.json") {
-                if file.read_to_string(&mut json_str).is_ok() {
-                    break;
-                }
-            }
-        }
-    }
-
-    if json_str.is_empty() {
-        return None;
-    }
-
+    let json_str = read_zip_entry(zip, "fabric.mod.json")?;
     let mod_json: FabricModJson = serde_json::from_str(&json_str).ok()?;
 
     let key = path.file_name().and_then(|s| s.to_str()).unwrap_or(&mod_json.name).to_string();

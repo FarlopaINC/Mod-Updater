@@ -34,6 +34,7 @@ pub struct SearchState {
     pub source: SearchSource,
     pub page: u32,
     pub limit: u32,
+    pub download_dependencies: bool,
 }
 
 impl Default for SearchState {
@@ -48,6 +49,7 @@ impl Default for SearchState {
             source: SearchSource::Explorer,
             page: 0,
             limit: 10,
+            download_dependencies: true,
         }
     }
 }
@@ -152,6 +154,24 @@ pub struct ModUpdaterApp {
     pub search_state: SearchState,
     tx_search: Sender<(SearchRequest, SearchSource)>, // Request, Source
     rx_search: Receiver<(Vec<UnifiedSearchResult>, SearchSource, u32)>, // Results, Source, Offset
+
+    // --- Dependency Resolution State ---
+    // (mod_key, project_id, version, loader, output_folder, existing_project_ids, existing_filenames)
+    tx_resolve_deps: Sender<(String, String, String, String, String, std::collections::HashSet<String>, std::collections::HashSet<String>)>,
+    // Returns (mod_key, list_of_dep_display_names) so the search card can update
+    rx_dep_resolved: Receiver<(String, Vec<String>)>,
+
+    // --- Profile Dependency Resolution ---
+    // (project_id, profile_name, version, loader, existing_project_ids)
+    tx_resolve_profile_deps: Sender<(String, String, String, String, std::collections::HashSet<String>)>,
+    // Returns (profile_name, Vec<(dep_name, dep_filename, dep_project_id, dep_slug)>)
+    rx_profile_deps_resolved: Receiver<(String, Vec<(String, String, String, String)>)>,
+
+    // --- Search Dep-Name Preview Resolution ---
+    // (slug, project_id, version, loader, cf_key)
+    tx_fetch_dep_names: Sender<(String, String, String, String, String)>,
+    // Returns (slug, dep_names)
+    rx_dep_names_result: Receiver<(String, Vec<String>)>,
 }
 
 impl ModUpdaterApp {
@@ -245,8 +265,113 @@ impl ModUpdaterApp {
             crate::local_mods_ops::cache::clean_cache();
         });
 
-        return Self { 
-            mods: ui_mods, 
+        // --- Dependency Resolver ---
+        // Channel: UI → Resolver
+        let (tx_resolve_deps, rx_resolve_deps) = unbounded::<(String, String, String, String, String, std::collections::HashSet<String>, std::collections::HashSet<String>)>();
+        // Channel: Resolver → UI (dep names discovered, to update search card)
+        let (tx_dep_resolved, rx_dep_resolved) = unbounded::<(String, Vec<String>)>();
+
+        {
+            let tx_jobs_clone = tx_jobs.clone();
+            let tx_dep_res = tx_dep_resolved.clone();
+            thread::spawn(move || {
+                while let Ok((mod_key, project_id, version, loader, output_folder, existing_ids, existing_filenames)) = rx_resolve_deps.recv() {
+                    println!("🔍 Resolviendo dependencias transitivas para {}...", mod_key);
+                    let cf_key = crate::fetch::cf_api_key();
+
+                    let dep_infos = crate::fetch::fetch_from_api::resolve_all_dependencies(
+                        &project_id,
+                        &version,
+                        &loader,
+                        &cf_key,
+                        &existing_ids,
+                    );
+
+                    // Filter out deps whose filename is already in the modpack (installed but not cached)
+                    let dep_infos: Vec<_> = dep_infos.into_iter().filter(|dep| {
+                        if existing_filenames.contains(&dep.filename) {
+                            println!("⏸ {} ya existe en el modpack (filename match), saltando.", dep.filename);
+                            false
+                        } else {
+                            true
+                        }
+                    }).collect();
+
+                    // Collect display names to send back to UI
+                    let dep_names: Vec<String> = dep_infos.iter().map(|d| d.filename.clone()).collect();
+                    let _ = tx_dep_res.send((mod_key.clone(), dep_names));
+
+                    // Enqueue each dep as a normal DownloadJob so it shows in DESCARGA
+                    for dep_info in dep_infos {
+                        println!("📥 Encolando dependencia: {}", dep_info.filename);
+                        let dep_mod_info = crate::local_mods_ops::ModInfo {
+                            key: dep_info.filename.clone(),
+                            name: dep_info.filename.clone(),
+                            detected_project_id: Some(dep_info.project_id.clone()),
+                            confirmed_project_id: Some(dep_info.project_id.clone()),
+                            version_local: Some(version.clone()),
+                            version_remote: Some(dep_info.version_remote.clone()),
+                            selected: true,
+                            file_size_bytes: None,
+                            file_mtime_secs: None,
+                            depends: None,
+                        };
+                        let job = crate::fetch::async_download::DownloadJob {
+                            key: dep_info.filename.clone(),
+                            modinfo: dep_mod_info,
+                            output_folder: output_folder.clone(),
+                            selected_version: version.clone(),
+                            selected_loader: loader.clone(),
+                        };
+                        let _ = tx_jobs_clone.send(job);
+                    }
+                }
+            });
+        }
+
+        // --- Profile Dependency Resolver ---
+        let (tx_resolve_profile_deps, rx_resolve_profile_deps) = unbounded::<(String, String, String, String, std::collections::HashSet<String>)>();
+        let (tx_profile_deps_res, rx_profile_deps_resolved) = unbounded::<(String, Vec<(String, String, String, String)>)>();
+
+        {
+            thread::spawn(move || {
+                while let Ok((project_id, profile_name, version, loader, existing_ids)) = rx_resolve_profile_deps.recv() {
+                    println!("🔍 Resolviendo deps para perfil '{}' (mod: {})...", profile_name, project_id);
+                    let cf_key = crate::fetch::cf_api_key();
+
+                    let dep_infos = crate::fetch::fetch_from_api::resolve_all_dependencies(
+                        &project_id,
+                        &version,
+                        &loader,
+                        &cf_key,
+                        &existing_ids,
+                    );
+
+                    // Send (name, filename, project_id, slug) so the UI can deduplicate against slug-based detected_project_id
+                    let deps: Vec<(String, String, String, String)> = dep_infos.into_iter()
+                        .map(|d| (d.name, d.filename, d.project_id, d.slug))
+                        .collect();
+
+                    let _ = tx_profile_deps_res.send((profile_name, deps));
+                }
+            });
+        }
+
+        // --- Search Dep-Name Preview Worker Pool ---
+        let (tx_fetch_dep_names, rx_fetch_dep_names) = unbounded::<(String, String, String, String, String)>();
+        let (tx_dep_names_res, rx_dep_names_result) = unbounded::<(String, Vec<String>)>();
+        {
+            let dep_workers = crate::ui::utils::calculate_worker_count(10);
+            let tx_res = std::sync::Arc::new(tx_dep_names_res);
+            crate::common::spawn_worker_pool(dep_workers, rx_fetch_dep_names, move |job: (String, String, String, String, String)| {
+                let (slug, project_id, version, loader, cf_key) = job;
+                let names = crate::fetch::fetch_from_api::fetch_dependency_names(&project_id, &version, &loader, &cf_key);
+                let _ = tx_res.send((slug, names));
+            });
+        }
+
+        return Self {
+            mods: ui_mods,
             mc_versions, 
             selected_mc_version: selected_mc_version.clone(), 
             tx_jobs, 
@@ -291,6 +416,12 @@ impl ModUpdaterApp {
             },
             tx_search,
             rx_search,
+            tx_resolve_deps,
+            rx_dep_resolved,
+            tx_resolve_profile_deps,
+            rx_profile_deps_resolved,
+            tx_fetch_dep_names,
+            rx_dep_names_result,
         };
     }
 
@@ -346,14 +477,14 @@ impl ModUpdaterApp {
                         };
 
                         let indicator = if is_active_disk && is_selected_ui {
-                            ">>" 
+                            ">> " 
                         } else if is_selected_ui {
                             "> "
                         } else {
                             "  "
                         };
 
-                        let suffix = if is_active_disk { " (ACT)" } else { "" };
+                        let suffix = if is_active_disk { " [ON]" } else { "" };
 
                         ui.horizontal(|ui| {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -362,7 +493,7 @@ impl ModUpdaterApp {
                                 }
 
                                 if is_selected_ui && !is_active_disk {
-                                    if tui_button_c(ui, "!", tui_theme::NEON_GREEN).on_hover_text("Activar este modpack").clicked() {
+                                    if tui_button_c(ui, "OFF", tui_theme::NEON_RED).on_hover_text("Activar este modpack").clicked() {
                                         self.status_msg = match change_mods(&mp) {
                                             Ok(msg) => msg,
                                             Err(e) => format!("Error: {}", e),
@@ -398,9 +529,9 @@ impl ModUpdaterApp {
 
     fn render_explorer_center(&mut self, ui: &mut egui::Ui) {
         let title = if let Some(mp) = &self.selected_modpack_ui {
-             format!("MODS EN: {}", mp.to_uppercase())
+            format!("MODS EN: {}", mp.to_uppercase())
         } else {
-             "MODS INSTALADOS (ACTIVOS)".to_string()
+            "MODS INSTALADOS (ACTIVOS)".to_string()
         };
         tui_heading(ui, &title);
         
@@ -441,7 +572,7 @@ impl ModUpdaterApp {
                 self.search_state.page = 0;
             }
 
-            if tui_button_c(ui, "DL", tui_theme::NEON_YELLOW)
+            if tui_button_c(ui, "↓", tui_theme::NEON_YELLOW)
                 .on_hover_text("Actualizar mods")
                 .clicked() {
                     // Open confirmation modal with default name
@@ -470,7 +601,12 @@ impl ModUpdaterApp {
         });
         ui.add_space(8.0);
         ScrollArea::vertical().show(ui, |ui| {
-            let keys: Vec<String> = self.mods.keys().cloned().collect();
+            let mut keys: Vec<String> = self.mods.keys().cloned().collect();
+            keys.sort_by(|a, b| {
+                let na = self.mods.get(a).map(|m| m.name.to_lowercase()).unwrap_or_default();
+                let nb = self.mods.get(b).map(|m| m.name.to_lowercase()).unwrap_or_default();
+                na.cmp(&nb)
+            });
             for key in keys {
                 if let Some(m) = self.mods.get_mut(&key) {
                     ui.horizontal(|ui| {
@@ -493,43 +629,66 @@ impl ModUpdaterApp {
                             });
 
                             if let Some(deps) = &m.depends {
-                                let mut loaders = Vec::new();
-                                let mut others = Vec::new();
-                                
                                 let loader_keys = ["fabricloader", "fabric-loader", "forge", "neoforge", "quilt_loader"];
-                                
+                                let system_keys = ["minecraft", "java"];
+
+                                let mut loader_labels: Vec<String> = Vec::new();
+                                let mut mc_label: Option<String> = None;
+                                let mut mod_deps: Vec<String> = Vec::new();
+
                                 for (k, v) in deps {
+                                    if k == "java" { continue; } // silently omit
                                     let clean_ver = format_version_range(v);
                                     let clean_name = format_dep_name(k);
-                                    
                                     if loader_keys.contains(&k.as_str()) {
-                                        loaders.push((clean_name, clean_ver));
-                                    } else if ["minecraft", "fabric-api"].contains(&k.as_str()) {
-                                        others.push((clean_name, clean_ver));
+                                        loader_labels.push(format!("{} {}", clean_name, clean_ver));
+                                    } else if k == "minecraft" {
+                                        mc_label = Some(format!("MC {}", clean_ver));
+                                    } else if !system_keys.contains(&k.as_str()) {
+                                        mod_deps.push(format!("{} {}", clean_name, clean_ver));
                                     }
                                 }
-                                
-                                let mut display_items = Vec::new();
-                                
-                                // Handle Loaders
-                                if loaders.len() == 1 {
-                                    let (n, v) = &loaders[0];
-                                    display_items.push(format!("{} {}", n, v));
-                                } else if loaders.len() > 1 {
-                                    let tooltip = loaders.iter().map(|(n, v)| format!("{} {}", n, v)).collect::<Vec<_>>().join("\n");
-                                    ui.label(egui::RichText::new("Multi-Loader ℹ").size(11.0).color(ui.visuals().weak_text_color()))
-                                    .on_hover_text(tooltip);
+
+                                // Build the small summary line: e.g. "Fabric >=0.14  |  MC >=1.20"
+                                let mut summary_parts: Vec<String> = Vec::new();
+                                match loader_labels.len() {
+                                    0 => {}
+                                    1 => summary_parts.push(loader_labels[0].clone()),
+                                    _ => summary_parts.push(format!("Multi-Loader ({})", loader_labels.join(", "))),
+                                }
+                                if let Some(mc) = mc_label { summary_parts.push(mc); }
+
+                                if !summary_parts.is_empty() {
+                                    tui_dim(ui, &format!("├── {}", summary_parts.join("  |  ")));
                                 }
 
-                                // Add others
-                                for (n, v) in others {
-                                    display_items.push(format!("{} {}", n, v));
-                                }
-
-                                if !display_items.is_empty() {
-                                    tui_dim(ui, &format!("├── {}", display_items.join("  |  ")));
+                                // Collapsible for actual mod dependencies only
+                                if !mod_deps.is_empty() {
+                                    let header_text = format!("Dependencias ({})", mod_deps.len());
+                                    egui::CollapsingHeader::new(
+                                        egui::RichText::new(&header_text)
+                                            .family(egui::FontFamily::Monospace)
+                                            .color(tui_theme::TEXT_DIM)
+                                            .size(11.0)
+                                    )
+                                    .id_salt(format!("moddeps_{}", &m.inner.key))
+                                    .default_open(false)
+                                    .show(ui, |ui| {
+                                        for item in &mod_deps {
+                                            ui.horizontal(|ui| {
+                                                tui_dim(ui, "•");
+                                                ui.label(
+                                                    egui::RichText::new(item)
+                                                        .family(egui::FontFamily::Monospace)
+                                                        .color(tui_theme::TEXT_DIM)
+                                                        .size(11.0)
+                                                );
+                                            });
+                                        }
+                                    });
                                 }
                             }
+
                         });
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -591,7 +750,8 @@ impl ModUpdaterApp {
                 tui_separator(ui);
 
                 ScrollArea::vertical().show(ui, |ui| {
-                    let names: Vec<String> = self.profiles_db.profiles.keys().cloned().collect();
+                    let mut names: Vec<String> = self.profiles_db.profiles.keys().cloned().collect();
+                    names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
                     for name in names {
                         ui.horizontal(|ui| {
                             let is_selected = self.selected_profile_name.as_ref() == Some(&name);
@@ -655,7 +815,14 @@ impl ModUpdaterApp {
                     let mut to_mark = Vec::new();
                     let mut to_unmark = Vec::new();
 
-                    for (k, m) in &profile.mods {
+                    let mut sorted_mod_keys: Vec<String> = profile.mods.keys().cloned().collect();
+                    sorted_mod_keys.sort_by(|a, b| {
+                        let na = profile.mods.get(a).map(|m| m.name.to_lowercase()).unwrap_or_default();
+                        let nb = profile.mods.get(b).map(|m| m.name.to_lowercase()).unwrap_or_default();
+                        na.cmp(&nb)
+                    });
+                    for k in &sorted_mod_keys {
+                    let m = &profile.mods[k];
                         let is_pending = self.profile_mods_pending_deletion.contains(k);
                         ui.horizontal(|ui| {
                             if is_pending {
@@ -1152,13 +1319,63 @@ impl eframe::App for ModUpdaterApp {
         self.render_search_modal(ctx);
 
         // --- Search Results Poll ---
-        while let Ok((new_results, _source, offset)) = self.rx_search.try_recv() {
+        while let Ok((mut new_results, _source, offset)) = self.rx_search.try_recv() {
+            // Fire off dep-name resolution for each result that has a project id
+            let cf_key = crate::fetch::cf_api_key();
+            let version = self.search_state.version.clone();
+            let loader = self.search_state.loader.clone();
+            for res in &mut new_results {
+                let project_id = res.modrinth_id.clone()
+                    .or_else(|| res.curseforge_id.map(|id| id.to_string()));
+                if let Some(pid) = project_id {
+                    res.fetching_dependencies = true;
+                    let _ = self.tx_fetch_dep_names.send((
+                        res.slug.clone(),
+                        pid,
+                        version.clone(),
+                        loader.clone(),
+                        cf_key.clone(),
+                    ));
+                }
+            }
             if offset == 0 {
                 self.search_state.results = new_results;
             } else {
                 self.search_state.results.extend(new_results);
             }
             self.search_state.is_searching = false;
+        }
+
+        // --- Dependency Resolution Results Poll ---
+        // When the resolver thread finishes, update the matching search card with dep names
+        while let Ok((mod_key, dep_names)) = self.rx_dep_resolved.try_recv() {
+            if let Some(result) = self.search_state.results.iter_mut().find(|r| r.name == mod_key) {
+                result.dependencies = Some(dep_names);
+            }
+        }
+
+        // --- Dep-Name Preview Results Poll ---
+        while let Ok((slug, dep_names)) = self.rx_dep_names_result.try_recv() {
+            if let Some(result) = self.search_state.results.iter_mut().find(|r| r.slug == slug) {
+                result.dependencies = Some(dep_names);
+                result.fetching_dependencies = false;
+            }
+        }
+
+        // --- Profile Dependency Resolution Results Poll ---
+        while let Ok((profile_name, deps)) = self.rx_profile_deps_resolved.try_recv() {
+            if let Some(profile) = self.profiles_db.get_profile_mut(&profile_name) {
+                for (dep_name, dep_filename, dep_project_id, dep_slug) in deps {
+                    if !profile.contains_mod(&dep_filename, &dep_project_id, &dep_slug) {
+                        profile.mods.insert(
+                            dep_filename.clone(),
+                            crate::local_mods_ops::ModInfo::from_dep(dep_filename, dep_name, dep_project_id, dep_slug),
+                        );
+                    }
+                }
+                save_profiles(&self.profiles_db);
+                self.status_msg = format!("Dependencias añadidas al perfil '{}'.", profile_name);
+            }
         }
     }
 }
@@ -1168,11 +1385,11 @@ impl ModUpdaterApp {
         let mut open = self.search_state.open;
         if !open { return; }
 
-         let title = if let SearchSource::Profile(p) = &self.search_state.source {
-             format!("BUSCAR para '{}'", p)
-         } else {
-             "BUSCAR MODS".to_string()
-         };
+        let title = if let SearchSource::Profile(p) = &self.search_state.source {
+            format!("BUSCAR para '{}'", p)
+        } else {
+            "BUSCAR MODS".to_string()
+        };
 
         egui::Window::new(&title)
             .open(&mut open)
@@ -1200,9 +1417,74 @@ impl ModUpdaterApp {
                                     ui.selectable_value(&mut self.search_state.version, v.clone(), v);
                                 }
                             });
+                            
                     });
                     ui.add_space(5.0);
+
+                    // --- Version/Loader mismatch warning ---
+                    // Only shown when a modpack is selected and its mods are loaded
+                    if !self.mods.is_empty() {
+                        let loader_keys = ["fabricloader", "fabric-loader", "forge", "neoforge", "quilt_loader"];
+
+                        // Detect dominant MC version from depends["minecraft"] of loaded mods
+                        let mut ver_count: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+                        for m in self.mods.values() {
+                            if let Some(deps) = &m.depends {
+                                if let Some(mc_ver) = deps.get("minecraft") {
+                                    let clean = format_version_range(mc_ver);
+                                    // Take only the first part if it's a range (e.g. "1.21.10 - 1.21.11" → "1.21.10")
+                                    let base = clean.split_whitespace().next().unwrap_or(&clean).to_string();
+                                    if !base.is_empty() && base != "*" {
+                                        *ver_count.entry(base).or_insert(0) += 1;
+                                    }
+                                }
+                            }
+                        }
+                        let modpack_version = ver_count.into_iter().max_by_key(|(_, c)| *c).map(|(v, _)| v);
+
+                        // Detect dominant loader from depends keys
+                        let modpack_loader = self.mods.values().find_map(|m| {
+                            m.depends.as_ref()?.keys()
+                                .find(|k| loader_keys.contains(&k.as_str()))
+                                .map(|k| format_dep_name(k))
+                        });
+
+                        let search_ver = &self.search_state.version;
+                        let search_loader = &self.search_state.loader;
+
+                        let ver_mismatch = modpack_version.as_ref().map_or(false, |v| v != search_ver);
+                        let loader_mismatch = modpack_loader.as_ref().map_or(false, |l| {
+                            l.to_lowercase() != search_loader.to_lowercase()
+                        });
+
+                        if ver_mismatch || loader_mismatch {
+                            ui.add_space(2.0);
+                            if ver_mismatch {
+                                let msg = format!(
+                                    "⚠  Versión del modpack: {}  —  buscando para: {}",
+                                    modpack_version.as_deref().unwrap_or("?"),
+                                    search_ver
+                                );
+                                tui_theme::tui_status(ui, &msg, tui_theme::WARNING);
+                            }
+                            if loader_mismatch {
+                                let msg = format!(
+                                    "⚠  Loader del modpack: {}  —  buscando para: {}",
+                                    modpack_loader.as_deref().unwrap_or("?"),
+                                    search_loader
+                                );
+                                tui_theme::tui_status(ui, &msg, tui_theme::WARNING);
+                            }
+                            ui.add_space(2.0);
+                        }
+                    }
                 }
+
+                ui.horizontal(|ui| {
+                    super::tui_theme::tui_checkbox(ui, &mut self.search_state.download_dependencies);
+                    tui_dim(ui, "Añadir dependencias");
+                });
+                ui.add_space(3.0);
 
                 ui.horizontal(|ui| {
                     tui_dim(ui, "Buscar:");
@@ -1258,10 +1540,42 @@ impl ModUpdaterApp {
                                     tui_dim(ui, &res.author);
                                     tui_dim(ui, &res.description);
                                     
+                                    // Source badges
                                     ui.horizontal(|ui| {
                                         if res.modrinth_id.is_some() { tui_theme::tui_status(ui, "[MR]", tui_theme::NEON_GREEN); }
                                         if res.curseforge_id.is_some() { tui_theme::tui_status(ui, "[CF]", tui_theme::NEON_YELLOW); }
+                                        if res.fetching_dependencies { ui.spinner(); tui_dim(ui, "deps..."); }
                                     });
+
+                                    // Dependencies collapsible list
+                                    if let Some(deps) = &res.dependencies {
+                                        if !deps.is_empty() {
+                                            let header_text = format!("Dependencias ({})", deps.len());
+                                            egui::CollapsingHeader::new(
+                                                egui::RichText::new(&header_text)
+                                                    .family(egui::FontFamily::Monospace)
+                                                    .color(tui_theme::TEXT_DIM)
+                                                    .size(11.0)
+                                            )
+                                            .id_salt(format!("deps_{}", &res.slug))
+                                            .default_open(false)
+                                            .show(ui, |ui| {
+                                                for dep in deps {
+                                                    ui.horizontal(|ui| {
+                                                        tui_dim(ui, "•");
+                                                        ui.label(
+                                                            egui::RichText::new(dep)
+                                                                .family(egui::FontFamily::Monospace)
+                                                                .color(tui_theme::TEXT_DIM)
+                                                                .size(11.0)
+                                                        );
+                                                    });
+                                                }
+                                            });
+                                        } else if !res.fetching_dependencies {
+                                            tui_dim(ui, "├── Sin dependencias");
+                                        }
+                                    }
                                 });
 
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1300,6 +1614,32 @@ impl ModUpdaterApp {
                                                     };
                                                     let _ = std::fs::create_dir_all(&output_folder_path);
 
+                                                         if self.search_state.download_dependencies {
+                                                        let mod_id_str = res.modrinth_id.clone()
+                                                            .or_else(|| res.curseforge_id.map(|id| id.to_string()))
+                                                            .unwrap_or_else(|| res.slug.clone());
+
+                                                        // Build existing sets from self.mods (selected modpack in-memory — source of truth)
+                                                        let mut existing_project_ids = std::collections::HashSet::new();
+                                                        let mut existing_filenames = std::collections::HashSet::new();
+                                                        for (key, m) in &self.mods {
+                                                            existing_filenames.insert(key.clone());
+                                                            if let Some(id) = &m.confirmed_project_id { existing_project_ids.insert(id.clone()); }
+                                                            if let Some(id) = &m.detected_project_id { existing_project_ids.insert(id.clone()); }
+                                                        }
+
+                                                        let _ = self.tx_resolve_deps.send((
+                                                            res.name.clone(),
+                                                            mod_id_str,
+                                                            self.search_state.version.clone(),
+                                                            self.search_state.loader.clone(),
+                                                            output_folder_path.to_string_lossy().to_string(),
+                                                            existing_project_ids,
+                                                            existing_filenames,
+                                                        ));
+                                                    }
+                                                    
+                                                    // ALWAYS download the searched mod
                                                     let job = DownloadJob {
                                                         key: res.name.clone(),
                                                         modinfo: mod_info.clone(),
@@ -1315,29 +1655,53 @@ impl ModUpdaterApp {
                                             }
                                         },
                                         SearchSource::Profile(p_name) => {
-                                            if tui_button_c(ui, "ADD", tui_theme::NEON_GREEN).clicked() {
+                                            // Check if mod is already in the profile
+                                            let res_id = res.modrinth_id.clone()
+                                                .or_else(|| res.curseforge_id.map(|id| id.to_string()))
+                                                .unwrap_or_default();
+                                            let already_in_profile = self.profiles_db.get_profile(p_name)
+                                                .map_or(false, |p| p.contains_mod(&res.name, &res_id, &res.slug));
+
+                                            if already_in_profile {
+                                                tui_theme::tui_status(ui, "[OK]", tui_theme::NEON_GREEN);
+                                            } else if tui_button_c(ui, "ADD", tui_theme::NEON_GREEN).clicked() {
+                                                let project_id = res.modrinth_id.clone()
+                                                    .or_else(|| res.curseforge_id.map(|id| id.to_string()));
                                                 if let Some(profile) = self.profiles_db.get_profile_mut(p_name) {
-                                                    // Add to profile
-                                                    let mod_info = crate::local_mods_ops::ModInfo {
-                                                    key: res.name.clone(),
-                                                    name: res.name.clone(),
-                                                    detected_project_id: res.modrinth_id.clone(),
-                                                    confirmed_project_id: res.modrinth_id.clone().or_else(|| res.curseforge_id.map(|id| id.to_string())),
-                                                    version_local: Some("Universal".to_string()), 
-                                                    version_remote: None,
-                                                    selected: true,
-                                                    file_size_bytes: None,
-                                                    file_mtime_secs: None,
-                                                    depends: None,
-                                                };
-                                                profile.mods.insert(res.name.clone(), mod_info);
+                                                    let mod_info = crate::local_mods_ops::ModInfo::from_search(
+                                                        res.name.clone(), project_id.clone(),
+                                                    );
+                                                    profile.mods.insert(res.name.clone(), mod_info);
                                                 }
-                                                // save_profiles(&self.profiles_db); // Auto-save happens in update logic for profiles? No, explicits.
-                                                // We should save here.
                                                 save_profiles(&self.profiles_db);
                                                 self.status_msg = format!("Mod '{}' añadido al perfil.", res.name);
+
+                                                // Auto-add dependencies if checkbox is active
+                                                if self.search_state.download_dependencies {
+                                                    let mod_id = res.modrinth_id.clone()
+                                                        .or_else(|| res.curseforge_id.map(|id| id.to_string()))
+                                                        .unwrap_or_else(|| res.slug.clone());
+
+                                                    // Build set of project_ids already in profile
+                                                    let existing_ids: std::collections::HashSet<String> = {
+                                                        if let Some(profile) = self.profiles_db.get_profile(p_name) {
+                                                            profile.mods.values().flat_map(|m| {
+                                                                m.confirmed_project_id.iter().chain(m.detected_project_id.iter()).cloned()
+                                                            }).collect()
+                                                        } else { std::collections::HashSet::new() }
+                                                    };
+
+                                                    let _ = self.tx_resolve_profile_deps.send((
+                                                        mod_id,
+                                                        p_name.clone(),
+                                                        self.search_state.version.clone(),
+                                                        self.search_state.loader.clone(),
+                                                        existing_ids,
+                                                    ));
+                                                }
                                             }
                                         }
+
                                     }
                                 });
                             });

@@ -131,7 +131,7 @@ fn clean_name_from_filename(filename: &str) -> String {
 
 // ── Parser de datapack ───────────────────────────────────────
 
-fn read_single_datapack(path: &Path) -> Result<DatapackInfo, String> {
+pub fn read_single_datapack(path: &Path) -> Result<DatapackInfo, String> {
     let file = File::open(path).map_err(|_| "No se pudo abrir archivo".to_string())?;
     let mut zip = ZipArchive::new(file).map_err(|_| "No es un ZIP válido".to_string())?;
 

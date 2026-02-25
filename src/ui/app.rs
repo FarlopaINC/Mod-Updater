@@ -11,6 +11,10 @@ use crate::local_mods_ops::{
     spawn_read_workers, ReadJob, ReadEvent,
     ModInfo,
 };
+use crate::local_datapacks_ops::{
+    DatapackInfo, DatapackReadJob, DatapackReadEvent,
+    list_worlds, spawn_datapack_read_workers, pack_format_to_mc,
+};
 use crate::profiles::{ProfilesDatabase, Profile, load_profiles, save_profiles};
 use crate::fetch::async_download::{spawn_workers, DownloadJob, DownloadEvent};
 use crate::fetch::single_mod_search::{UnifiedSearchResult, search_unified, SearchRequest};
@@ -105,6 +109,7 @@ pub enum DownloadSource {
 pub enum AppTab {
     Explorer,
     Profiles,
+    Datapacks,
 }
 
 pub struct ModUpdaterApp {
@@ -172,6 +177,13 @@ pub struct ModUpdaterApp {
     tx_fetch_dep_names: Sender<(String, String, String, String, String)>,
     // Returns (slug, dep_names)
     rx_dep_names_result: Receiver<(String, Vec<String>)>,
+
+    // --- Datapacks State ---
+    pub cached_worlds: Vec<String>,
+    pub world_datapacks: IndexMap<String, IndexMap<String, DatapackInfo>>,
+    tx_dp_read_jobs: Sender<DatapackReadJob>,
+    rx_dp_read_events: Receiver<DatapackReadEvent>,
+    datapacks_loaded: bool,
 }
 
 impl ModUpdaterApp {
@@ -370,6 +382,14 @@ impl ModUpdaterApp {
             });
         }
 
+        // --- Datapack Read Workers ---
+        let (tx_dp_read_jobs, rx_dp_read_jobs) = unbounded::<DatapackReadJob>();
+        let (tx_dp_read_events_send, rx_dp_read_events) = unbounded::<DatapackReadEvent>();
+        {
+            let dp_workers = crate::ui::utils::calculate_worker_count(10);
+            spawn_datapack_read_workers(dp_workers, rx_dp_read_jobs, tx_dp_read_events_send);
+        }
+
         return Self {
             mods: ui_mods,
             mc_versions, 
@@ -422,6 +442,13 @@ impl ModUpdaterApp {
             rx_profile_deps_resolved,
             tx_fetch_dep_names,
             rx_dep_names_result,
+
+            // Datapacks
+            cached_worlds: Vec::new(),
+            world_datapacks: IndexMap::new(),
+            tx_dp_read_jobs,
+            rx_dp_read_events,
+            datapacks_loaded: false,
         };
     }
 
@@ -896,6 +923,133 @@ impl ModUpdaterApp {
             tui_dim(ui, "Selecciona un perfil o crea uno nuevo.");
         }
     }
+
+    fn load_all_datapacks(&mut self) {
+        self.world_datapacks.clear();
+        self.cached_worlds = list_worlds();
+        // Pre-create empty entries for each world so they appear immediately
+        for w in &self.cached_worlds {
+            self.world_datapacks.entry(w.clone()).or_insert_with(IndexMap::new);
+        }
+        // Enqueue async read jobs for all .zip files in each world
+        for world in &self.cached_worlds {
+            let dp_folder = PATHS.saves_folder.join(world).join("datapacks");
+            if let Ok(entries) = std::fs::read_dir(&dp_folder) {
+                for entry in entries.filter_map(|e| e.ok()) {
+                    let path = entry.path();
+                    if path.extension().and_then(|s| s.to_str()) == Some("zip") {
+                        let _ = self.tx_dp_read_jobs.send(DatapackReadJob {
+                            file_path: path,
+                            world_name: world.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        self.datapacks_loaded = true;
+        self.status_msg = format!("Escaneando datapacks en {} mundos...", self.cached_worlds.len());
+    }
+
+    fn render_datapacks_center(&mut self, ui: &mut egui::Ui) {
+        tui_heading(ui, "DATAPACKS");
+        ui.add_space(2.0);
+
+        ui.horizontal(|ui| {
+            if tui_button(ui, "F5").on_hover_text("Recargar mundos y datapacks").clicked() {
+                self.datapacks_loaded = false;
+                self.load_all_datapacks();
+            }
+        });
+        ui.add_space(8.0);
+
+        if self.cached_worlds.is_empty() {
+            tui_dim(ui, "(no se encontraron mundos en saves/)");
+            return;
+        }
+
+        ScrollArea::vertical().id_salt("datapacks_scroll").show(ui, |ui| {
+            let mut worlds_sorted = self.cached_worlds.clone();
+            worlds_sorted.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+
+            for world in &worlds_sorted {
+                let packs = self.world_datapacks.get(world);
+                let count = packs.map(|p| p.len()).unwrap_or(0);
+
+                let header_text = format!("{}  ({})", world, count);
+                egui::CollapsingHeader::new(
+                    egui::RichText::new(&header_text)
+                        .family(egui::FontFamily::Monospace)
+                        .color(tui_theme::ACCENT)
+                        .strong()
+                )
+                .id_salt(format!("world_{}", world))
+                .default_open(false)
+                .show(ui, |ui| {
+                    if count == 0 {
+                        tui_dim(ui, "  (vacío)");
+                        return;
+                    }
+
+                    let packs_map = self.world_datapacks.get(world).unwrap();
+                    let mut sorted_keys: Vec<String> = packs_map.keys().cloned().collect();
+                    sorted_keys.sort_by(|a, b| {
+                        let na = packs_map.get(a).map(|d| d.name.to_lowercase()).unwrap_or_default();
+                        let nb = packs_map.get(b).map(|d| d.name.to_lowercase()).unwrap_or_default();
+                        na.cmp(&nb)
+                    });
+
+                    for key in &sorted_keys {
+                        if let Some(dp) = packs_map.get(key) {
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    // Name line
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new(&dp.name)
+                                            .family(egui::FontFamily::Monospace)
+                                            .color(tui_theme::TEXT_PRIMARY)
+                                            .strong());
+                                        if let Some(v) = &dp.version_local {
+                                            ui.label(egui::RichText::new(format!("v{}", v))
+                                                .family(egui::FontFamily::Monospace)
+                                                .color(tui_theme::TEXT_DIM)
+                                                .size(11.0));
+                                        }
+                                    });
+
+                                    // Info line: pack_format → MC version
+                                    let mut info_parts: Vec<String> = Vec::new();
+                                    if let Some(pf) = dp.pack_format {
+                                        let mc = dp.mc_version.as_deref().unwrap_or("?");
+                                        info_parts.push(format!("pack{} → MC {}", pf, mc));
+                                    }
+                                    if let Some((min, max)) = dp.supported_formats {
+                                        if min != max {
+                                            info_parts.push(format!("formatos {}-{}", min, max));
+                                        }
+                                    }
+                                    if let Some(slug) = &dp.detected_project_id {
+                                        info_parts.push(format!("slug: {}", slug));
+                                    }
+                                    if let Some(size) = dp.file_size_bytes {
+                                        let size_str = if size >= 1_048_576 {
+                                            format!("{:.1} MB", size as f64 / 1_048_576.0)
+                                        } else {
+                                            format!("{:.0} KB", size as f64 / 1024.0)
+                                        };
+                                        info_parts.push(size_str);
+                                    }
+                                    if !info_parts.is_empty() {
+                                        tui_dim(ui, &format!("├── {}", info_parts.join("  |  ")));
+                                    }
+                                });
+                            });
+                            ui.separator();
+                        }
+                    }
+                });
+            }
+        });
+    }
 }
 
 impl eframe::App for ModUpdaterApp {
@@ -908,6 +1062,12 @@ impl eframe::App for ModUpdaterApp {
                 }
                 if tui_tab(ui, "PERFILES", self.current_tab == AppTab::Profiles).clicked() {
                     self.current_tab = AppTab::Profiles;
+                }
+                if tui_tab(ui, "DATAPACKS", self.current_tab == AppTab::Datapacks).clicked() {
+                    self.current_tab = AppTab::Datapacks;
+                    if !self.datapacks_loaded {
+                        self.load_all_datapacks();
+                    }
                 }
             });
         });
@@ -923,6 +1083,7 @@ impl eframe::App for ModUpdaterApp {
         match self.current_tab {
             AppTab::Explorer => self.render_explorer_side(ctx),
             AppTab::Profiles => self.render_profiles_side(ctx),
+            AppTab::Datapacks => {}, // Sin sidebar
         }
 
         // --- Main Content ---
@@ -930,6 +1091,7 @@ impl eframe::App for ModUpdaterApp {
             match self.current_tab {
                 AppTab::Explorer => self.render_explorer_center(ui),
                 AppTab::Profiles => self.render_profiles_center(ui),
+                AppTab::Datapacks => self.render_datapacks_center(ui),
             }
         });
 
@@ -994,6 +1156,33 @@ impl eframe::App for ModUpdaterApp {
                     if let Some(m) = self.mods.get_mut(&key) {
                         m.status = ModStatus::Error("Failed to read".to_string());
                     }
+                }
+            }
+        }
+
+        // --- Datapack Read Events ---
+        for ev in self.rx_dp_read_events.try_iter() {
+            match ev {
+                DatapackReadEvent::Done { world_name, info } => {
+                    let key = info.key.clone();
+                    self.world_datapacks
+                        .entry(world_name)
+                        .or_insert_with(IndexMap::new)
+                        .insert(key, info);
+                }
+                DatapackReadEvent::Error { world_name, path, msg } => {
+                    println!("Error reading datapack {:?}: {}", path, msg);
+                    let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    let fallback = DatapackInfo {
+                        key: filename.clone(),
+                        name: filename.clone(),
+                        selected: true,
+                        ..Default::default()
+                    };
+                    self.world_datapacks
+                        .entry(world_name)
+                        .or_insert_with(IndexMap::new)
+                        .insert(filename, fallback);
                 }
             }
         }

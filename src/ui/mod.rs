@@ -1,4 +1,10 @@
 pub mod app;
 pub mod utils;
 pub mod tui_theme;
-
+pub mod types;
+pub mod explorer;
+pub mod profiles;
+pub mod datapacks;
+pub mod modals;
+pub mod search_modal;
+pub mod event_handlers;

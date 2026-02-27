@@ -17,7 +17,6 @@ pub enum DatapackReadEvent {
 
 pub fn spawn_datapack_read_workers(n: usize, rx: Receiver<DatapackReadJob>, tx: Sender<DatapackReadEvent>) {
     spawn_worker_pool(n, rx, move |job: DatapackReadJob| {
-        let filename = job.file_path.file_name().unwrap_or_default().to_string_lossy().to_string();
         match super::scanner::read_single_datapack(&job.file_path) {
             Ok(mut info) => {
                 // Attach file metadata

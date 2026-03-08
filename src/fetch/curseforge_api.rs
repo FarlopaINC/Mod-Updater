@@ -4,6 +4,7 @@ use serde::Deserialize;
 use std::sync::Mutex;
 use std::time::Instant;
 use once_cell::sync::Lazy;
+use crate::fetch::search_provider::ContentType;
 
 #[derive(Debug, Deserialize)]
 struct ApiResponse<T> {
@@ -132,12 +133,13 @@ fn build_curse_client(api_key: &str) -> Client {
 
 // ── API Functions ────────────────────────────────────────────
 
-pub fn search_curseforge(query: &str, api_key: &str, loader: &Option<String>, version: &Option<String>, offset: u32, limit: u32) -> Vec<CurseMod> {
+pub fn search_curseforge(query: &str, api_key: &str, loader: &Option<String>, version: &Option<String>, offset: u32, limit: u32, class_id: Option<u32>) -> Vec<CurseMod> {
     let client = build_curse_client(api_key);
     let search_url = "https://api.curseforge.com/v1/mods/search";
     
     let limit_str = limit.to_string();
     let offset_str = offset.to_string();
+    let class_id_str = class_id.map(|id| id.to_string());
     
     let mut params = vec![
         ("gameId", "432"),
@@ -147,6 +149,10 @@ pub fn search_curseforge(query: &str, api_key: &str, loader: &Option<String>, ve
         ("pageSize", &limit_str),
         ("index", &offset_str),
     ];
+
+    if let Some(ref cid) = class_id_str {
+        params.push(("classId", cid));
+    }
     
     if let Some(v) = version {
         if !v.trim().is_empty() {
@@ -194,25 +200,28 @@ pub fn search_curseforge(query: &str, api_key: &str, loader: &Option<String>, ve
 }
 
 pub fn fetch_curseforge_project_id(mod_name: &str, api_key: &str) -> Option<u32> {
-    let results = search_curseforge(mod_name, api_key, &None, &None, 0, 10);
+    let results = search_curseforge(mod_name, api_key, &None, &None, 0, 10, None);
     results.first().map(|m| m.id)
 }
 
-pub fn fetch_curseforge_version_file(mod_id: u32, game_version: &str, loader: &str, api_key: &str) -> Option<CurseFile> {
+pub fn fetch_curseforge_version_file(mod_id: u32, game_version: &str, loader: &str, api_key: &str, content_type: &ContentType) -> Option<CurseFile> {
     let client = build_curse_client(api_key);
     let api_url = format!("https://api.curseforge.com/v1/mods/{}/files", mod_id);
 
     // Map loader to CurseForge ID
-    // 1 = Forge, 4 = Fabric, 5 = Quilt, 6 = NeoForge
-    let loader_type = match loader.to_lowercase().as_str() {
-        "any" => "0",
-        "forge" => "1",
-        "cauldron" => "2",
-        "liteloader" => "3",
-        "fabric" => "4",
-        "quilt" => "5",
-        "neoforge" => "6",
-        _ => "4", // Default to Fabric if unknown
+    // 0 = Any (used for datapacks), 1 = Forge, 4 = Fabric, 5 = Quilt, 6 = NeoForge
+    let loader_type = match content_type {
+        ContentType::Datapack => "0",
+        _ => match loader.to_lowercase().as_str() {
+            "any" => "0",
+            "forge" => "1",
+            "cauldron" => "2",
+            "liteloader" => "3",
+            "fabric" => "4",
+            "quilt" => "5",
+            "neoforge" => "6",
+            _ => "4",
+        },
     };
 
     let params = [
@@ -225,11 +234,17 @@ pub fn fetch_curseforge_version_file(mod_id: u32, game_version: &str, loader: &s
     match client.get(&api_url).query(&params).send() {
         Ok(resp) => {
             if resp.status().is_success() {
-                let mut files: ApiResponse<Vec<CurseFile>> = resp.json().unwrap();
+                let files: ApiResponse<Vec<CurseFile>> = resp.json().unwrap();
                 if files.data.is_empty() {
                     None
                 } else {
-                    Some(files.data.remove(0))
+                    // Filter by file extension based on content type
+                    let target_ext = match content_type {
+                        ContentType::Datapack => ".zip",
+                        _ => ".jar",
+                    };
+                    files.data.into_iter()
+                        .find(|f| f.file_name.to_lowercase().ends_with(target_ext))
                 }
             } else {
                 println!("❌ Error en API CurseForge para {}: status {}", mod_id, resp.status());

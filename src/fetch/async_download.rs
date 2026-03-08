@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::local_mods_ops::ModInfo;
 use crate::fetch::fetch_from_api;
 use crate::common::spawn_worker_pool;
+use crate::fetch::search_provider::ContentType;
 
 #[derive(Debug, Clone)]
 pub enum DownloadEvent {
@@ -22,6 +23,7 @@ pub struct DownloadJob {
     pub output_folder: String,
     pub selected_version: String,
     pub selected_loader: String,
+    pub content_type: ContentType,
 }
 
 pub fn spawn_workers(n: usize, rx: Receiver<DownloadJob>, tx_events: Sender<DownloadEvent>) {
@@ -44,7 +46,7 @@ pub fn spawn_workers(n: usize, rx: Receiver<DownloadJob>, tx_events: Sender<Down
             })
             .or(mi.detected_project_id.clone());
 
-        match fetch_from_api::find_mod_download(&mi.name, resolved_id.as_deref(), &job.selected_version, &job.selected_loader, &cf_key) {
+        match fetch_from_api::find_mod_download(&mi.name, resolved_id.as_deref(), &job.selected_version, &job.selected_loader, &cf_key, &job.content_type) {
             Some(info) => {
                 let confirmed_project_id = Some(info.project_id.clone());
                 let version_remote = Some(info.version_remote.clone());

@@ -5,6 +5,7 @@ use serde_json::json;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use once_cell::sync::Lazy;
+use crate::fetch::search_provider::ContentType;
 
 #[derive(Debug, Deserialize)]
 pub struct ModrinthVersion {
@@ -124,7 +125,7 @@ pub fn has_capacity() -> bool {
 
 // ── API Functions ────────────────────────────────────────────
 
-pub fn search_modrinth_project(query: &str, loader: &Option<String>, version: &Option<String>, offset: u32, limit: u32) -> Vec<ModrinthSearchHit> {
+pub fn search_modrinth_project(query: &str, loader: &Option<String>, version: &Option<String>, offset: u32, limit: u32, extra_facets: &[String]) -> Vec<ModrinthSearchHit> {
     let client = &*MODRINTH_CLIENT;
     let search_url = "https://api.modrinth.com/v2/search";
     
@@ -138,6 +139,10 @@ pub fn search_modrinth_project(query: &str, loader: &Option<String>, version: &O
         if !l.trim().is_empty() {
             facets.push(format!("[\"categories:{}\"]", l.to_lowercase()));
         }
+    }
+    // Merge extra facets from provider (e.g. project_type filter)
+    for f in extra_facets {
+        facets.push(f.clone());
     }
     
     let facets_str = if facets.is_empty() {
@@ -202,12 +207,18 @@ pub fn fetch_modrinth_project_info(mod_id: &str) -> Option<(String, String)> {
     }
 }
 
-pub fn fetch_modrinth_version(mod_id: &str, version: &str, loader: &str) -> Option<ModrinthVersion> {
+pub fn fetch_modrinth_version(mod_id: &str, version: &str, loader: &str, content_type: &ContentType) -> Option<ModrinthVersion> {
     let client = &*MODRINTH_CLIENT;
     let api_url = format!("https://api.modrinth.com/v2/project/{}/version", mod_id);
 
+    // Datapacks use "datapack" as the loader to get .zip files from Modrinth
+    let effective_loader = match content_type {
+        ContentType::Datapack => "datapack",
+        _ => loader,
+    };
+
     // Prepare query parameters for filtering
-    let loaders_json = json!([loader.to_lowercase()]).to_string();
+    let loaders_json = json!([effective_loader.to_lowercase()]).to_string();
     let versions_json = json!([version]).to_string();
 
     let params = [

@@ -5,6 +5,7 @@ use once_cell::sync::Lazy;
 use super::modrinth_api;
 use super::curseforge_api;
 use super::modrinth_api::ModrinthSearchHit;
+use super::search_provider::ContentType;
 
 static DOWNLOAD_CLIENT: Lazy<Client> = Lazy::new(|| {
     Client::builder()
@@ -31,10 +32,10 @@ pub struct ModDownloadInfo {
 }
 
 /// Intenta resolver un mod en Modrinth (por ID directo, búsqueda por ID, y búsqueda por nombre).
-fn try_modrinth(mod_name: &str, mod_id: Option<&str>, game_version: &str, loader: &str) -> Option<ModDownloadInfo> {
+fn try_modrinth(mod_name: &str, mod_id: Option<&str>, game_version: &str, loader: &str, content_type: &ContentType) -> Option<ModDownloadInfo> {
     // Helper para verificar y extraer info de un hit de Modrinth
     let try_find_version = |hit: &ModrinthSearchHit| -> Option<ModDownloadInfo> {
-        if let Some(modrinth_version) = modrinth_api::fetch_modrinth_version(&hit.project_id, game_version, loader) {
+        if let Some(modrinth_version) = modrinth_api::fetch_modrinth_version(&hit.project_id, game_version, loader, content_type) {
             if let Some(file) = modrinth_version.first_file() {
                 println!("✅ Encontrado en Modrinth: {} (Project: {})", file.filename, hit.title);
                 
@@ -49,12 +50,12 @@ fn try_modrinth(mod_name: &str, mod_id: Option<&str>, game_version: &str, loader
                 });
             }
         }
-        None
+        return None;
     };
 
     // 1. Intento por ID directo
     if let Some(id) = mod_id {
-        if let Some(modrinth_version) = modrinth_api::fetch_modrinth_version(id, game_version, loader) {
+        if let Some(modrinth_version) = modrinth_api::fetch_modrinth_version(id, game_version, loader, content_type) {
             if let Some(file) = modrinth_version.first_file() {
                 println!("✅ Encontrado en Modrinth (Directo): {} (ID: {})", file.filename, id);
                 
@@ -73,7 +74,7 @@ fn try_modrinth(mod_name: &str, mod_id: Option<&str>, game_version: &str, loader
         }
 
         // Fallback: búsqueda por slug
-        let hits = modrinth_api::search_modrinth_project(id, &None, &None, 0, 5);
+        let hits = modrinth_api::search_modrinth_project(id, &None, &None, 0, 5, &[]);
         for hit in &hits {
             if hit.slug == id {
                 if let Some(info) = try_find_version(hit) {
@@ -84,7 +85,7 @@ fn try_modrinth(mod_name: &str, mod_id: Option<&str>, game_version: &str, loader
     }
 
     // 2. Intento por nombre
-    let hits = modrinth_api::search_modrinth_project(mod_name, &None, &None, 0, 5);
+    let hits = modrinth_api::search_modrinth_project(mod_name, &None, &None, 0, 5, &[]);
     for hit in &hits {
         let slug_match = mod_id.map_or(false, |id| hit.slug == id);
         let name_match = hit.title.to_lowercase().contains(&mod_name.to_lowercase()) || mod_name.to_lowercase().contains(&hit.title.to_lowercase());
@@ -95,18 +96,17 @@ fn try_modrinth(mod_name: &str, mod_id: Option<&str>, game_version: &str, loader
             }
         }
     }
-
-    None
+    return None;
 }
 
 /// Intenta resolver un mod en CurseForge (búsqueda por nombre → fichero de versión).
-fn try_curseforge(mod_name: &str, game_version: &str, loader: &str, curseforge_api_key: &str) -> Option<ModDownloadInfo> {
+fn try_curseforge(mod_name: &str, game_version: &str, loader: &str, curseforge_api_key: &str, content_type: &ContentType) -> Option<ModDownloadInfo> {
     if curseforge_api_key.is_empty() {
         return None;
     }
 
     if let Some(curseforge_id) = curseforge_api::fetch_curseforge_project_id(mod_name, curseforge_api_key) {
-        if let Some(curse_file) = curseforge_api::fetch_curseforge_version_file(curseforge_id, game_version, loader, curseforge_api_key) {
+        if let Some(curse_file) = curseforge_api::fetch_curseforge_version_file(curseforge_id, game_version, loader, curseforge_api_key, content_type) {
             if let Some(download_url) = curse_file.download_url {
                 println!("✅ Encontrado en CurseForge: {}", curse_file.file_name);
                 
@@ -133,12 +133,12 @@ fn try_curseforge(mod_name: &str, game_version: &str, loader: &str, curseforge_a
             }
         }
     }
-    None
+    return None;
 }
 
 /// Intenta encontrar un mod usando balanceo dinámico entre Modrinth y CurseForge.
 /// Ambas APIs se intentan SIEMPRE antes de reportar error — el balanceo solo cambia el orden.
-pub fn find_mod_download(mod_name: &str, mod_id: Option<&str>, game_version: &str, loader: &str, curseforge_api_key: &str) -> Option<ModDownloadInfo> {
+pub fn find_mod_download(mod_name: &str, mod_id: Option<&str>, game_version: &str, loader: &str, curseforge_api_key: &str, content_type: &ContentType) -> Option<ModDownloadInfo> {
     println!("🔍 Procesando '{}' (ID: {:?}) v{} [{}]...", mod_name, mod_id.unwrap_or("N/A"), game_version, loader);
 
     // Decidir orden según capacidad disponible
@@ -146,21 +146,21 @@ pub fn find_mod_download(mod_name: &str, mod_id: Option<&str>, game_version: &st
 
     if modrinth_first {
         // Orden normal: Modrinth → CurseForge
-        if let Some(info) = try_modrinth(mod_name, mod_id, game_version, loader) {
+        if let Some(info) = try_modrinth(mod_name, mod_id, game_version, loader, content_type) {
             return Some(info);
         }
         println!("⚠️ No encontrado en Modrinth. Probando en CurseForge...");
-        if let Some(info) = try_curseforge(mod_name, game_version, loader, curseforge_api_key) {
+        if let Some(info) = try_curseforge(mod_name, game_version, loader, curseforge_api_key, content_type) {
             return Some(info);
         }
     } else {
         // Swap: CurseForge primero (Modrinth agotado)
         println!("🔄 Modrinth rate limit bajo, priorizando CurseForge...");
-        if let Some(info) = try_curseforge(mod_name, game_version, loader, curseforge_api_key) {
+        if let Some(info) = try_curseforge(mod_name, game_version, loader, curseforge_api_key, content_type) {
             return Some(info);
         }
         println!("⚠️ No encontrado en CurseForge. Probando en Modrinth...");
-        if let Some(info) = try_modrinth(mod_name, mod_id, game_version, loader) {
+        if let Some(info) = try_modrinth(mod_name, mod_id, game_version, loader, content_type) {
             return Some(info);
         }
     }
@@ -192,7 +192,7 @@ pub fn resolve_all_dependencies(
     }
 
     // Fetch the root's deps
-    if let Some(root_info) = find_mod_download("", Some(root_project_id), game_version, loader, cf_key) {
+    if let Some(root_info) = find_mod_download("", Some(root_project_id), game_version, loader, cf_key, &ContentType::Mod) {
         for dep in root_info.dependencies {
             if !visited.contains(&dep.mod_id) {
                 queue.push_back(dep.mod_id);
@@ -206,7 +206,7 @@ pub fn resolve_all_dependencies(
         }
         visited.insert(dep_id.clone());
 
-        if let Some(info) = find_mod_download("", Some(&dep_id), game_version, loader, cf_key) {
+        if let Some(info) = find_mod_download("", Some(&dep_id), game_version, loader, cf_key, &ContentType::Mod) {
             // Enqueue transitive deps
             for transitive in &info.dependencies {
                 if !visited.contains(&transitive.mod_id) {
@@ -232,7 +232,7 @@ pub fn fetch_dependency_names(
     cf_key: &str,
 ) -> Vec<String> {
     // 1. Try Modrinth
-    if let Some(ver) = modrinth_api::fetch_modrinth_version(project_id, game_version, loader) {
+    if let Some(ver) = modrinth_api::fetch_modrinth_version(project_id, game_version, loader, &ContentType::Mod) {
         let deps = ver.required_deps();
         if !deps.is_empty() {
             return deps.iter()
@@ -250,7 +250,7 @@ pub fn fetch_dependency_names(
     // 2. Try CurseForge (project_id might be a numeric CF id)
     if !cf_key.is_empty() {
         if let Ok(cf_id) = project_id.parse::<u32>() {
-            if let Some(cf_file) = curseforge_api::fetch_curseforge_version_file(cf_id, game_version, loader, cf_key) {
+            if let Some(cf_file) = curseforge_api::fetch_curseforge_version_file(cf_id, game_version, loader, cf_key, &ContentType::Mod) {
                 let deps: Vec<String> = cf_file.dependencies.as_ref()
                     .map(|deps| {
                         deps.iter()

@@ -1,7 +1,7 @@
 use eframe::egui;
 
 use crate::paths_vars::PATHS;
-use crate::fetch::single_mod_search::SearchRequest;
+use crate::fetch::search_provider::{SearchRequest, ContentType};
 use crate::fetch::async_download::DownloadJob;
 use crate::profiles::save_profiles;
 
@@ -14,29 +14,32 @@ impl super::app::ModUpdaterApp {
         let mut open = self.search_state.open;
         if !open { return; }
 
-        let title = if let SearchSource::Profile(p) = &self.search_state.source {
-            format!("BUSCAR para '{}'", p)
-        } else {
-            "BUSCAR MODS".to_string()
+        let title = match &self.search_state.source {
+            SearchSource::Profile(p) => format!("BUSCAR para '{}'", p),
+            SearchSource::World(w) => format!("BUSCAR DATAPACKS — {}", w),
+            _ => format!("BUSCAR {}", self.search_state.content_type.display_name().to_uppercase()),
         };
 
         egui::Window::new(&title)
             .open(&mut open)
             .resize(|r| r.fixed_size(egui::vec2(700.0, 600.0))) // Start larger
             .show(ctx, |ui| {
-                // Filters Row (Only for Explorer / Direct Download)
-                let is_explorer = matches!(self.search_state.source, SearchSource::Explorer);
+                // Filters Row (Only for Explorer / World / Direct Download)
+                let is_explorer = matches!(self.search_state.source, SearchSource::Explorer | SearchSource::World(_));
+                let supports_loader = self.search_state.content_type == ContentType::Mod;
                 
                 if is_explorer {
                     ui.horizontal(|ui| {
-                        tui_dim(ui, "Loader:");
-                        egui::ComboBox::from_id_salt("search_loader")
-                            .selected_text(&self.search_state.loader)
-                            .show_ui(ui, |ui| {
-                                for l in &self.loaders {
-                                    ui.selectable_value(&mut self.search_state.loader, l.clone(), l);
-                                }
-                            });
+                        if supports_loader {
+                            tui_dim(ui, "Loader:");
+                            egui::ComboBox::from_id_salt("search_loader")
+                                .selected_text(&self.search_state.loader)
+                                .show_ui(ui, |ui| {
+                                    for l in &self.loaders {
+                                        ui.selectable_value(&mut self.search_state.loader, l.clone(), l);
+                                    }
+                                });
+                        }
 
                         tui_dim(ui, "Version:");
                         egui::ComboBox::from_id_salt("search_version_selector")
@@ -135,7 +138,10 @@ impl super::app::ModUpdaterApp {
                             self.search_state.results.clear();
                             
                             let (loader, version) = if is_explorer {
-                                (Some(self.search_state.loader.clone()), Some(self.search_state.version.clone()))
+                                (
+                                    if supports_loader { Some(self.search_state.loader.clone()) } else { None },
+                                    Some(self.search_state.version.clone()),
+                                )
                             } else {
                                 (None, None)
                             };
@@ -146,6 +152,7 @@ impl super::app::ModUpdaterApp {
                                 version,
                                 offset: 0,
                                 limit: self.search_state.limit,
+                                content_type: self.search_state.content_type,
                             };
                             let _ = self.tx_search.send((req, self.search_state.source.clone()));
                         }
@@ -210,7 +217,7 @@ impl super::app::ModUpdaterApp {
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     // Contextual Action
                                     match &self.search_state.source {
-                                        SearchSource::Explorer => {
+                                        SearchSource::Explorer | SearchSource::World(_) => {
                                             // Check progress by name
                                             if let Some(status) = self.active_downloads.get(&res.name) {
                                                 match status {
@@ -233,13 +240,21 @@ impl super::app::ModUpdaterApp {
                                                         file_mtime_secs: None,
                                                         depends: None,
                                                     };
-                                                    
-                                                    // Output folder
-                                                    let output_folder_path = if let Some(mp) = &self.selected_modpack_ui {
-                                                        PATHS.modpacks_folder.join(mp)
-                                                    } else {
-                                                        crate::local_mods_ops::prepare_output_folder(&self.selected_mc_version);
-                                                        PATHS.modpacks_folder.join(format!(r"mods{}", self.selected_mc_version))
+                                                    // Output folder: depends on source type
+                                                    let output_folder_path = match &self.search_state.source {
+                                                        SearchSource::World(world_name) => {
+                                                            // Datapacks go to saves/{world}/datapacks/
+                                                            PATHS.saves_folder.join(world_name).join("datapacks")
+                                                        },
+                                                        _ => {
+                                                            // Mods go to modpacks folder
+                                                            if let Some(mp) = &self.selected_modpack_ui {
+                                                                PATHS.modpacks_folder.join(mp)
+                                                            } else {
+                                                                crate::local_mods_ops::prepare_output_folder(&self.selected_mc_version);
+                                                                PATHS.modpacks_folder.join(format!(r"mods{}", self.selected_mc_version))
+                                                            }
+                                                        },
                                                     };
                                                     let _ = std::fs::create_dir_all(&output_folder_path);
 
@@ -275,6 +290,7 @@ impl super::app::ModUpdaterApp {
                                                         output_folder: output_folder_path.to_string_lossy().to_string(),
                                                         selected_version: self.search_state.version.clone(), // Use search version
                                                         selected_loader: self.search_state.loader.clone(), // Use search loader
+                                                        content_type: self.search_state.content_type,
                                                     };
                                                     let _ = self.tx_jobs.send(job);
                                                     
@@ -347,9 +363,13 @@ impl super::app::ModUpdaterApp {
                                 self.search_state.page += 1;
                                 let offset = self.search_state.page * self.search_state.limit;
                                 
-                                let is_explorer = matches!(self.search_state.source, SearchSource::Explorer);
+                                let is_explorer = matches!(self.search_state.source, SearchSource::Explorer | SearchSource::World(_));
+                                let supports_loader = self.search_state.content_type == ContentType::Mod;
                                 let (loader, version) = if is_explorer {
-                                    (Some(self.search_state.loader.clone()), Some(self.search_state.version.clone()))
+                                    (
+                                        if supports_loader { Some(self.search_state.loader.clone()) } else { None },
+                                        Some(self.search_state.version.clone()),
+                                    )
                                 } else {
                                     (None, None)
                                 };
@@ -360,6 +380,7 @@ impl super::app::ModUpdaterApp {
                                     version,
                                     offset,
                                     limit: self.search_state.limit,
+                                    content_type: self.search_state.content_type,
                                 };
                                 let _ = self.tx_search.send((req, self.search_state.source.clone()));
                             }

@@ -58,15 +58,43 @@ impl super::app::ModUpdaterApp {
                 let count = packs.map(|p| p.len()).unwrap_or(0);
 
                 let header_text = format!("{}  ({})", world, count);
-                egui::CollapsingHeader::new(
-                    egui::RichText::new(&header_text)
-                        .family(egui::FontFamily::Monospace)
-                        .color(tui_theme::ACCENT)
-                        .strong()
-                )
-                .id_salt(format!("world_{}", world))
-                .default_open(false)
-                .show(ui, |ui| {
+                let collapsing_id = ui.make_persistent_id(format!("world_{}", world));
+                let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+                    ui.ctx(), collapsing_id, false
+                );
+
+                // Custom header: [▶ WorldName (count)]  [BUSCAR] (only when open)
+                let header_resp = ui.horizontal(|ui| {
+                    state.show_toggle_button(ui, egui::collapsing_header::paint_default_icon);
+                    
+                    let label_resp = ui.label(
+                        egui::RichText::new(&header_text)
+                            .family(egui::FontFamily::Monospace)
+                            .color(tui_theme::ACCENT)
+                            .strong()
+                    );
+                    
+                    // Toggle on label click too
+                    if label_resp.clicked() {
+                        state.toggle(ui);
+                    }
+
+                    // Show BUSCAR only when expanded
+                    if state.is_open() {
+                        if tui_button(ui, "BUSCAR").on_hover_text(format!("Buscar datapacks para '{}'", world)).clicked() {
+                            self.search_state.open = true;
+                            self.search_state.source = super::types::SearchSource::World(world.clone());
+                            self.search_state.content_type = crate::fetch::search_provider::ContentType::Datapack;
+                            self.search_state.version = self.selected_mc_version.clone();
+                            self.search_state.results.clear();
+                            self.search_state.query.clear();
+                            self.search_state.page = 0;
+                        }
+                    }
+                });
+
+                // Body content (indented)
+                state.show_body_indented(&header_resp.response, ui, |ui| {
                     if count == 0 {
                         tui_dim(ui, "  (vacío)");
                         return;

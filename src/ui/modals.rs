@@ -182,6 +182,7 @@ impl super::app::ModUpdaterApp {
                                                     output_folder: output_folder_path.to_string_lossy().to_string(),
                                                     selected_version: self.selected_mc_version.clone(),
                                                     selected_loader: self.selected_loader.clone(),
+                                                    content_type: crate::fetch::search_provider::ContentType::Mod,
                                                 };
                                                 let _ = self.tx_jobs.send(job);
                                                 count += 1;
@@ -197,6 +198,7 @@ impl super::app::ModUpdaterApp {
                                                     output_folder: output_folder_path.to_string_lossy().to_string(),
                                                     selected_version: self.selected_mc_version.clone(),
                                                     selected_loader: self.selected_loader.clone(),
+                                                    content_type: crate::fetch::search_provider::ContentType::Mod,
                                                 };
                                                 let _ = self.tx_jobs.send(job);
                                                 count += 1;

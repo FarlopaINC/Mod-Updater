@@ -15,7 +15,9 @@ use crate::local_datapacks_ops::{
 };
 use crate::profiles::{ProfilesDatabase, load_profiles};
 use crate::fetch::async_download::{spawn_workers, DownloadJob, DownloadEvent};
-use crate::fetch::single_mod_search::{UnifiedSearchResult, search_unified, SearchRequest};
+use crate::fetch::search_provider::{UnifiedSearchResult, SearchRequest, ContentType, ContentSearchProvider};
+use crate::fetch::single_mod_search::ModSearchProvider;
+use crate::fetch::datapack_search::DatapackSearchProvider;
 use crate::paths_vars::PATHS;
 use super::tui_theme::{self, tui_tab, tui_dim};
 
@@ -167,13 +169,24 @@ impl ModUpdaterApp {
         let (tx_search, rx_search_req) = unbounded::<(SearchRequest, SearchSource)>();
         let (tx_search_res, rx_search) = unbounded();
         
-        // Spawn Search Worker
+        // Spawn Search Worker (uses dynamic dispatch via ContentSearchProvider)
         {
             let tx_res = tx_search_res.clone();
             thread::spawn(move || {
+                // Build provider registry
+                let providers: HashMap<ContentType, Box<dyn ContentSearchProvider>> = HashMap::from([
+                    (ContentType::Mod, Box::new(ModSearchProvider) as Box<dyn ContentSearchProvider>),
+                    (ContentType::Datapack, Box::new(DatapackSearchProvider) as Box<dyn ContentSearchProvider>),
+                ]);
+
                 while let Ok((req, source)) = rx_search_req.recv() {
                     let offset = req.offset;
-                    let results = search_unified(&req);
+                    let results = if let Some(provider) = providers.get(&req.content_type) {
+                        provider.search(&req)
+                    } else {
+                        println!("⚠ No hay provider para {:?}", req.content_type);
+                        Vec::new()
+                    };
                     let _ = tx_res.send((results, source, offset));
                 }
             });
@@ -246,6 +259,7 @@ impl ModUpdaterApp {
                             output_folder: output_folder.clone(),
                             selected_version: version.clone(),
                             selected_loader: loader.clone(),
+                            content_type: crate::fetch::search_provider::ContentType::Mod,
                         };
                         let _ = tx_jobs_clone.send(job);
                     }

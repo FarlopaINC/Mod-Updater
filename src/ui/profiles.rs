@@ -74,6 +74,7 @@ impl super::app::ModUpdaterApp {
                         if tui_button(ui, "BUSCAR").on_hover_text("Buscar / Añadir Mod").clicked() {
                              self.search_state.open = true;
                              self.search_state.source = SearchSource::Profile(name.clone());
+                             self.search_state.content_type = crate::fetch::search_provider::ContentType::Mod;
                              
                              // Sync defaults
                              self.search_state.version = self.selected_mc_version.clone();

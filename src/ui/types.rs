@@ -1,11 +1,12 @@
 use std::ops::{Deref, DerefMut};
 use crate::local_mods_ops::ModInfo;
-use crate::fetch::single_mod_search::UnifiedSearchResult;
+use crate::fetch::search_provider::{UnifiedSearchResult, ContentType};
 
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub enum SearchSource {
     Explorer,
     Profile(String),
+    World(String),  // Datapack search for a specific world/save
 }
 
 pub struct SearchState {
@@ -19,6 +20,7 @@ pub struct SearchState {
     pub page: u32,
     pub limit: u32,
     pub download_dependencies: bool,
+    pub content_type: ContentType,
 }
 
 impl Default for SearchState {
@@ -34,6 +36,7 @@ impl Default for SearchState {
             page: 0,
             limit: 10,
             download_dependencies: true,
+            content_type: ContentType::Mod,
         }
     }
 }

@@ -82,7 +82,10 @@ impl super::app::ModUpdaterApp {
                                 if is_selected_ui && !is_active_disk {
                                     if tui_button_c(ui, "OFF", tui_theme::NEON_RED).on_hover_text("Activar este modpack").clicked() {
                                         self.status_msg = match change_mods(&mp) {
-                                            Ok(msg) => msg,
+                                            Ok(msg) => {
+                                                self.active_modpack = Some(mp.clone());
+                                                msg
+                                            },
                                             Err(e) => format!("Error: {}", e),
                                         };
                                     }
@@ -152,6 +155,7 @@ impl super::app::ModUpdaterApp {
             if tui_button(ui, "BUSCAR").clicked() {
                 self.search_state.open = true;
                 self.search_state.source = SearchSource::Explorer;
+                self.search_state.content_type = crate::fetch::search_provider::ContentType::Mod;
                 // Sync defaults with current selection if first open or reset?
                 self.search_state.version = self.selected_mc_version.clone();
                 self.search_state.loader = self.selected_loader.clone();

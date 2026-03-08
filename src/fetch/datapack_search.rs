@@ -1,21 +1,21 @@
 use super::search_provider::{ContentSearchProvider, ContentType, SearchRequest, UnifiedSearchResult};
 use super::{modrinth_api, curseforge_api};
 
-/// Provider de búsqueda para Mods — implementa el trait genérico.
-pub struct ModSearchProvider;
+/// Provider de búsqueda para Datapacks — implementa el trait genérico.
+pub struct DatapackSearchProvider;
 
-impl ContentSearchProvider for ModSearchProvider {
+impl ContentSearchProvider for DatapackSearchProvider {
     fn content_type(&self) -> ContentType {
-        ContentType::Mod
+        ContentType::Datapack
     }
 
     fn search(&self, req: &SearchRequest) -> Vec<UnifiedSearchResult> {
         let mut results = Vec::new();
-        let extra_facets = vec!["[\"project_type:mod\"]".to_string()];
+        let extra_facets = vec!["[\"project_type:datapack\"]".to_string()];
 
-        // 1. Modrinth Search
+        // 1. Modrinth Search (datapacks no dependen del loader)
         let modrinth_hits = modrinth_api::search_modrinth_project(
-            &req.query, &req.loader, &req.version, req.offset, req.limit, &extra_facets,
+            &req.query, &None, &req.version, req.offset, req.limit, &extra_facets,
         );
         for hit in modrinth_hits {
             results.push(UnifiedSearchResult {
@@ -28,18 +28,17 @@ impl ContentSearchProvider for ModSearchProvider {
                 curseforge_id: None,
                 dependencies: None,
                 fetching_dependencies: false,
-                content_type: ContentType::Mod,
+                content_type: ContentType::Datapack,
             });
         }
 
-        // 2. CurseForge Search
+        // 2. CurseForge Search (classId 6945 = Datapacks)
         let cf_key = crate::fetch::cf_api_key();
         if !cf_key.is_empty() {
             let curse_hits = curseforge_api::search_curseforge(
-                &req.query, &cf_key, &req.loader, &req.version, req.offset, req.limit, Some(6),
+                &req.query, &cf_key, &None, &req.version, req.offset, req.limit, Some(6945),
             );
             for hit in curse_hits {
-                // Dedup by slug or name
                 if let Some(existing) = results.iter_mut().find(|r| r.slug == hit.slug || r.name == hit.name) {
                     existing.curseforge_id = Some(hit.id);
                     if existing.icon_url.is_none() {
@@ -59,7 +58,7 @@ impl ContentSearchProvider for ModSearchProvider {
                         curseforge_id: Some(hit.id),
                         dependencies: None,
                         fetching_dependencies: false,
-                        content_type: ContentType::Mod,
+                        content_type: ContentType::Datapack,
                     });
                 }
             }
@@ -67,6 +66,6 @@ impl ContentSearchProvider for ModSearchProvider {
         results
     }
 
-    fn supports_loader_filter(&self) -> bool { true }
+    fn supports_loader_filter(&self) -> bool { false }
     fn supports_version_filter(&self) -> bool { true }
 }

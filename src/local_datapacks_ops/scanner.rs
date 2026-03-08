@@ -17,9 +17,43 @@ struct PackMcMeta {
 
 #[derive(Debug, Deserialize)]
 struct PackInfo {
-    pack_format: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_pack_format")]
+    pack_format: Option<u32>,
+    #[serde(default, deserialize_with = "deserialize_supported_formats")]
     supported_formats: Option<SupportedFormats>,
+}
+
+/// Gracefully deserialize supported_formats, returning None if the format is unrecognized.
+fn deserialize_supported_formats<'de, D>(deserializer: D) -> Result<Option<SupportedFormats>, D::Error>
+where D: serde::Deserializer<'de> {
+    let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    match value {
+        None => Ok(None),
+        Some(v) => Ok(serde_json::from_value::<SupportedFormats>(v).ok()),
+    }
+}
+
+/// Accepts pack_format as integer, float (truncated), or missing.
+fn deserialize_pack_format<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where D: serde::Deserializer<'de> {
+    use serde::de;
+    struct PackFormatVisitor;
+    impl<'de> de::Visitor<'de> for PackFormatVisitor {
+        type Value = Option<u32>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("an integer or float for pack_format")
+        }
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
+            Ok(Some(v as u32))
+        }
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
+            Ok(Some(v as u32))
+        }
+        fn visit_f64<E: de::Error>(self, v: f64) -> Result<Self::Value, E> {
+            Ok(Some(v as u32))
+        }
+    }
+    deserializer.deserialize_any(PackFormatVisitor)
 }
 
 #[derive(Debug, Deserialize)]
@@ -204,7 +238,9 @@ pub fn read_single_datapack(path: &Path) -> Result<DatapackInfo, String> {
     let version_local = extract_version_from_filename(&filename);
 
     // 6. MC version desde pack_format
-    let mc_version = pack_format_to_mc(pack_meta.pack.pack_format).map(|s| s.to_string());
+    let mc_version = pack_meta.pack.pack_format
+        .and_then(|pf| pack_format_to_mc(pf))
+        .map(|s| s.to_string());
 
     // 7. Supported formats
     let supported_formats = pack_meta.pack.supported_formats.map(|sf| sf.as_range());
@@ -214,7 +250,7 @@ pub fn read_single_datapack(path: &Path) -> Result<DatapackInfo, String> {
         name,
         detected_project_id,
         confirmed_project_id: None,
-        pack_format: Some(pack_meta.pack.pack_format),
+        pack_format: pack_meta.pack.pack_format,
         supported_formats,
         mc_version,
         version_local,

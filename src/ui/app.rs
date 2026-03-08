@@ -408,7 +408,7 @@ impl eframe::App for ModUpdaterApp {
 
         // --- Side Panels (Must be called before CentralPanel) ---
         match self.current_tab {
-            AppTab::Explorer => self.render_explorer_side(ctx),
+            AppTab::Explorer => self.render_modpacks_side(ctx),
             AppTab::Profiles => self.render_profiles_side(ctx),
             AppTab::Datapacks => {}, // Sin sidebar
         }
@@ -416,7 +416,7 @@ impl eframe::App for ModUpdaterApp {
         // --- Main Content ---
         CentralPanel::default().show(ctx, |ui| {
             match self.current_tab {
-                AppTab::Explorer => self.render_explorer_center(ui),
+                AppTab::Explorer => self.render_modpacks_center(ui),
                 AppTab::Profiles => self.render_profiles_center(ui),
                 AppTab::Datapacks => self.render_datapacks_center(ui),
             }

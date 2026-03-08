@@ -63,7 +63,6 @@ impl super::app::ModUpdaterApp {
                     ui.ctx(), collapsing_id, false
                 );
 
-                // Custom header: [▶ WorldName (count)]  [BUSCAR] (only when open)
                 let header_resp = ui.horizontal(|ui| {
                     state.show_toggle_button(ui, egui::collapsing_header::paint_default_icon);
                     

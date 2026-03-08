@@ -38,10 +38,16 @@ impl super::app::ModUpdaterApp {
         }
     }
 
-    pub(crate) fn render_explorer_side(&mut self, ctx: &egui::Context) {
+    pub(crate) fn render_modpacks_side(&mut self, ctx: &egui::Context) {
+        let max_len = self.cached_modpacks.iter().map(|s| s.len()).max().unwrap_or(0);
+        // Approx 8px per char + space for buttons (X, OFF, ON), margin and scrollbar
+        let dynamic_min_width = 150.0_f32.max((max_len as f32 * 8.0) + 130.0);
+        let dynamic_max_width = 400.0_f32.max(dynamic_min_width + 100.0);
+
         SidePanel::right("selector_modpacks")
         .resizable(true)
-        .default_width(200.0)
+        .default_width(dynamic_min_width)
+        .width_range(dynamic_min_width..=dynamic_max_width)
         .show(ctx, |ui| {
             ui.add_space(4.0);
             tui_heading(ui, "MODPACKS");
@@ -71,9 +77,27 @@ impl super::app::ModUpdaterApp {
                             "  "
                         };
 
-                        let suffix = if is_active_disk { " [ON]" } else { "" };
 
                         ui.horizontal(|ui| {
+                            // Left side: modpack name button
+                            let label = format!("{}{}", indicator, mp);
+                            let color = if is_selected_ui { tui_theme::ACCENT } else { tui_theme::TEXT_PRIMARY };
+                            let text = egui::RichText::new(&label).color(color).family(egui::FontFamily::Monospace);
+                            if ui.add(egui::Button::new(text)
+                                .fill(egui::Color32::TRANSPARENT)
+                                .stroke(egui::Stroke::NONE)
+                                .corner_radius(egui::CornerRadius::ZERO)).clicked() {
+                                let target_folder = if is_selected_ui {
+                                    self.selected_modpack_ui = None;
+                                    PATHS.mods_folder.clone()
+                                } else {
+                                    self.selected_modpack_ui = Some(mp.clone());
+                                    PATHS.modpacks_folder.join(&mp)
+                                };
+                                self.load_mods_from_folder(&target_folder);
+                            }
+
+                            // Right side: [ON] indicator + buttons
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if tui_button_c(ui, "X", tui_theme::NEON_RED).on_hover_text("Eliminar modpack").clicked() {
                                     self.deletion_confirmation = DeletionConfirmation::Modpack(mp.clone());
@@ -91,26 +115,9 @@ impl super::app::ModUpdaterApp {
                                     }
                                 }
 
-                                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                    let label = format!("{}{}{}", indicator, mp, suffix);
-                                    let color = if is_selected_ui { tui_theme::ACCENT } else { tui_theme::TEXT_PRIMARY };
-                                    let text = egui::RichText::new(&label).color(color).family(egui::FontFamily::Monospace);
-                                    let avail = ui.available_size();
-                                    if ui.add(egui::Button::new(text)
-                                        .fill(egui::Color32::TRANSPARENT)
-                                        .stroke(egui::Stroke::NONE)
-                                        .corner_radius(egui::CornerRadius::ZERO)
-                                        .min_size(avail)).clicked() {
-                                        let target_folder = if is_selected_ui {
-                                            self.selected_modpack_ui = None;
-                                            PATHS.mods_folder.clone()
-                                        } else {
-                                            self.selected_modpack_ui = Some(mp.clone());
-                                            PATHS.modpacks_folder.join(&mp)
-                                        };
-                                        self.load_mods_from_folder(&target_folder);
-                                    }
-                                });
+                                if is_active_disk {
+                                    let _ = tui_button_c(ui, "ON", tui_theme::NEON_GREEN);
+                                }
                             });
                         });
                     }
@@ -119,7 +126,7 @@ impl super::app::ModUpdaterApp {
         });
     }
 
-    pub(crate) fn render_explorer_center(&mut self, ui: &mut egui::Ui) {
+    pub(crate) fn render_modpacks_center(&mut self, ui: &mut egui::Ui) {
         let title = if let Some(mp) = &self.selected_modpack_ui {
             format!("MODS EN: {}", mp.to_uppercase())
         } else {

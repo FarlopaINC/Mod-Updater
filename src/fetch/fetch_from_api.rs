@@ -166,7 +166,7 @@ pub fn find_mod_download(mod_name: &str, mod_id: Option<&str>, game_version: &st
     }
 
     println!("❌ No se encontró '{}' en ninguna plataforma.", mod_name);
-    None
+    return None;
 }
 
 /// Transitively resolves all **required** dependencies of `root_project_id`.
@@ -263,8 +263,7 @@ pub fn fetch_dependency_names(
             }
         }
     }
-
-    Vec::new()
+    return Vec::new();
 }
 
 pub fn download_mod_file(file_url: &str, output_folder: &str, filename: &str) -> Result<(), std::io::Error> {

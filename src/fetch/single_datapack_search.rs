@@ -6,7 +6,7 @@ pub struct DatapackSearchProvider;
 
 impl ContentSearchProvider for DatapackSearchProvider {
     fn content_type(&self) -> ContentType {
-        ContentType::Datapack
+        return ContentType::Datapack;
     }
 
     fn search(&self, req: &SearchRequest) -> Vec<UnifiedSearchResult> {

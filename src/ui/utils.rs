@@ -50,13 +50,3 @@ pub fn format_dep_name(k: &str) -> String {
         _ => k.to_string(), // fallback
     }
 }
-
-pub fn calculate_worker_count(task_count: usize) -> usize {
-    let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-    
-    // Dynamic worker calculation:
-    // - Small mod counts: 1 worker per mod (min(mods, max_workers))
-    // - Large mod counts: Up to 8 workers per cpu, capped at 64
-    let max_workers = (cpus * 8).clamp(4, 64);
-    std::cmp::min(task_count, max_workers).max(1)
-}

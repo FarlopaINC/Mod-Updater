@@ -17,7 +17,7 @@ use crate::profiles::{ProfilesDatabase, load_profiles};
 use crate::fetch::async_download::{spawn_workers, DownloadJob, DownloadEvent};
 use crate::fetch::search_provider::{UnifiedSearchResult, SearchRequest, ContentType, ContentSearchProvider};
 use crate::fetch::single_mod_search::ModSearchProvider;
-use crate::fetch::datapack_search::DatapackSearchProvider;
+use crate::fetch::single_datapack_search::DatapackSearchProvider;
 use crate::paths_vars::PATHS;
 use super::tui_theme::{self, tui_tab, tui_dim};
 
@@ -158,7 +158,7 @@ impl ModUpdaterApp {
 
         // Compute worker count
         let mods_count = ui_mods.len();
-        let workers = crate::ui::utils::calculate_worker_count(20.max(mods_count));
+        let workers = crate::common::calculate_worker_count(20.max(mods_count));
 
         spawn_workers(workers, rx_jobs, tx_events);
 
@@ -299,7 +299,7 @@ impl ModUpdaterApp {
         let (tx_fetch_dep_names, rx_fetch_dep_names) = unbounded::<(String, String, String, String, String)>();
         let (tx_dep_names_res, rx_dep_names_result) = unbounded::<(String, Vec<String>)>();
         {
-            let dep_workers = crate::ui::utils::calculate_worker_count(10);
+            let dep_workers = crate::common::calculate_worker_count(10);
             let tx_res = std::sync::Arc::new(tx_dep_names_res);
             crate::common::spawn_worker_pool(dep_workers, rx_fetch_dep_names, move |job: (String, String, String, String, String)| {
                 let (slug, project_id, version, loader, cf_key) = job;
@@ -312,7 +312,7 @@ impl ModUpdaterApp {
         let (tx_dp_read_jobs, rx_dp_read_jobs) = unbounded::<DatapackReadJob>();
         let (tx_dp_read_events_send, rx_dp_read_events) = unbounded::<DatapackReadEvent>();
         {
-            let dp_workers = crate::ui::utils::calculate_worker_count(10);
+            let dp_workers = crate::common::calculate_worker_count(10);
             spawn_datapack_read_workers(dp_workers, rx_dp_read_jobs, tx_dp_read_events_send);
         }
 

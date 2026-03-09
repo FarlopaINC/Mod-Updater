@@ -70,10 +70,10 @@ struct ModrinthRateLimit {
 }
 
 static RATE_LIMIT: Lazy<Mutex<ModrinthRateLimit>> = Lazy::new(|| {
-    Mutex::new(ModrinthRateLimit {
+    return Mutex::new(ModrinthRateLimit {
         remaining: 300, // Asumir cubo lleno al inicio
         reset_at: Instant::now(),
-    })
+    });
 });
 
 /// Si quedan pocas peticiones, duerme hasta que se resetee la ventana.
@@ -111,15 +111,15 @@ fn update_ratelimit(headers: &HeaderMap) {
 // ── Client ───────────────────────────────────────────────────
 
 static MODRINTH_CLIENT: Lazy<Client> = Lazy::new(|| {
-    Client::builder().user_agent("ModsUpdater/1.0 (github.com/FarlopaINC)").build().unwrap()
+    return Client::builder().user_agent("ModsUpdater/1.0 (github.com/FarlopaINC)").build().unwrap();
 });
 
 /// Consulta si Modrinth tiene capacidad de rate limit disponible (sin esperar).
 pub fn has_capacity() -> bool {
     if let Ok(state) = RATE_LIMIT.lock() {
-        state.remaining > 10 || Instant::now() >= state.reset_at
+        return state.remaining > 10 || Instant::now() >= state.reset_at;
     } else {
-        true // Si no podemos leer el mutex, asumir que sí hay capacidad
+        return true; // Si no podemos leer el mutex, asumir que sí hay capacidad
     }
 }
 

@@ -6,7 +6,7 @@ pub struct ModSearchProvider;
 
 impl ContentSearchProvider for ModSearchProvider {
     fn content_type(&self) -> ContentType {
-        ContentType::Mod
+        return ContentType::Mod;
     }
 
     fn search(&self, req: &SearchRequest) -> Vec<UnifiedSearchResult> {

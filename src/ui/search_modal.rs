@@ -3,16 +3,15 @@ use eframe::egui;
 use crate::paths_vars::PATHS;
 use crate::fetch::search_provider::{SearchRequest, ContentType};
 use crate::fetch::async_download::DownloadJob;
-use crate::profiles::save_profiles;
+
 
 use super::utils::{format_version_range, format_dep_name};
 use super::tui_theme::{self, tui_button, tui_button_c, tui_separator, tui_dim};
 use super::types::{SearchSource, ModStatus};
 
 impl super::app::ModUpdaterApp {
-    pub(crate) fn render_search_modal(&mut self, ctx: &egui::Context) {
-        let mut open = self.search_state.open;
-        if !open { return; }
+    pub(crate) fn render_search_center(&mut self, ui: &mut egui::Ui) {
+        if !self.search_state.open { return; }
 
         let title = match &self.search_state.source {
             SearchSource::Profile(p) => format!("BUSCAR para '{}'", p),
@@ -20,11 +19,16 @@ impl super::app::ModUpdaterApp {
             _ => format!("BUSCAR {}", self.search_state.content_type.display_name().to_uppercase()),
         };
 
-        egui::Window::new(&title)
-            .open(&mut open)
-            .resize(|r| r.fixed_size(egui::vec2(700.0, 600.0))) // Start larger
-            .show(ctx, |ui| {
-                // Filters Row (Only for Explorer / World / Direct Download)
+        ui.horizontal(|ui| {
+            if tui_button_c(ui, "<- ATRÁS", tui_theme::NEON_RED).clicked() {
+                self.search_state.open = false;
+            }
+            ui.add_space(8.0);
+            tui_theme::tui_heading(ui, &title);
+        });
+        ui.add_space(8.0);
+
+        // Filters Row (Only for Explorer / World / Direct Download)
                 let is_explorer = matches!(self.search_state.source, SearchSource::Explorer | SearchSource::World(_));
                 let supports_loader = self.search_state.content_type == ContentType::Mod;
                 
@@ -165,231 +169,244 @@ impl super::app::ModUpdaterApp {
 
                 tui_separator(ui);
 
-                egui::ScrollArea::vertical().max_height(450.0).show(ui, |ui| {
-                    for res in &self.search_state.results {
-                        ui.group(|ui| {
-                            ui.horizontal(|ui| {
-                                ui.vertical(|ui| {
-                                    ui.label(egui::RichText::new(&res.name)
-                                        .family(egui::FontFamily::Monospace)
-                                        .color(tui_theme::TEXT_PRIMARY).strong());
-                                    tui_dim(ui, &res.author);
-                                    tui_dim(ui, &res.description);
-                                    
-                                    // Source badges
+                let selected_project_opt = self.search_state.selected_project_for_versions.clone();
+                if let Some(selected_project) = selected_project_opt {
+                    // --- VERSION SELECTION VIEW ---
+                    ui.horizontal(|ui| {
+                        if tui_button(ui, "<- VOLVER").clicked() {
+                            self.search_state.selected_project_for_versions = None;
+                            self.search_state.project_versions_results.clear();
+                        }
+                        ui.add_space(10.0);
+                        ui.label(egui::RichText::new(format!("Versiones de: {}", selected_project.name))
+                            .family(egui::FontFamily::Monospace)
+                            .color(tui_theme::TEXT_PRIMARY).strong());
+                    });
+                    
+                    tui_separator(ui);
+
+                    if self.search_state.is_fetching_versions {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            tui_dim(ui, " Obteniendo versiones...");
+                        });
+                    } else if self.search_state.project_versions_results.is_empty() {
+                        tui_theme::tui_status(ui, "No se encontraron versiones compatibles.", tui_theme::WARNING);
+                    } else {
+                        egui::ScrollArea::vertical().max_height(450.0).show(ui, |ui| {
+                            for ver in &self.search_state.project_versions_results {
+                                ui.group(|ui| {
                                     ui.horizontal(|ui| {
-                                        if res.modrinth_id.is_some() { tui_theme::tui_status(ui, "[MR]", tui_theme::NEON_GREEN); }
-                                        if res.curseforge_id.is_some() { tui_theme::tui_status(ui, "[CF]", tui_theme::NEON_YELLOW); }
-                                        if res.fetching_dependencies { ui.spinner(); tui_dim(ui, "deps..."); }
-                                    });
-
-                                    // Dependencies collapsible list
-                                    if let Some(deps) = &res.dependencies {
-                                        if !deps.is_empty() {
-                                            let header_text = format!("Dependencias ({})", deps.len());
-                                            egui::CollapsingHeader::new(
-                                                egui::RichText::new(&header_text)
+                                        // Left side: Version Info
+                                        ui.vertical(|ui| {
+                                            ui.horizontal(|ui| {
+                                                // Release type badge (R/A/B)
+                                                let (rl_text, rl_color) = match ver.release_type.as_str() {
+                                                    "R" => ("[R]", tui_theme::NEON_GREEN),
+                                                    "B" => ("[B]", tui_theme::NEON_YELLOW),
+                                                    "A" => ("[A]", tui_theme::NEON_RED),
+                                                    _ => ("[?]", tui_theme::TEXT_DIM),
+                                                };
+                                                tui_theme::tui_status(ui, rl_text, rl_color);
+                                                
+                                                ui.label(egui::RichText::new(&ver.version_number)
                                                     .family(egui::FontFamily::Monospace)
-                                                    .color(tui_theme::TEXT_DIM)
-                                                    .size(11.0)
-                                            )
-                                            .id_salt(format!("deps_{}", &res.slug))
-                                            .default_open(false)
-                                            .show(ui, |ui| {
-                                                for dep in deps {
-                                                    ui.horizontal(|ui| {
-                                                        tui_dim(ui, "•");
-                                                        ui.label(
-                                                            egui::RichText::new(dep)
-                                                                .family(egui::FontFamily::Monospace)
-                                                                .color(tui_theme::TEXT_DIM)
-                                                                .size(11.0)
-                                                        );
-                                                    });
-                                                }
+                                                    .color(tui_theme::TEXT_PRIMARY).strong()
+                                                );
+                                                
+                                                tui_dim(ui, &format!("({})", ver.date_published));
                                             });
-                                        } else if !res.fetching_dependencies {
-                                            tui_dim(ui, "├── Sin dependencias");
-                                        }
-                                    }
-                                });
+                                            
+                                            // Game versions
+                                            if !ver.game_versions.is_empty() {
+                                                tui_dim(ui, &format!("MC: {}", ver.game_versions.join(", ")));
+                                            }
+                                        });
 
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    // Contextual Action
-                                    match &self.search_state.source {
-                                        SearchSource::Explorer | SearchSource::World(_) => {
-                                            // Check progress by name
-                                            if let Some(status) = self.active_downloads.get(&res.name) {
-                                                match status {
-                                                    ModStatus::Done => { tui_theme::tui_status(ui, "[OK]", tui_theme::NEON_GREEN); },
-                                                    _ => { tui_theme::tui_status(ui, "[...]", tui_theme::NEON_YELLOW); },
-                                                }
-                                            } else {
-                                                if tui_button_c(ui, "DL", tui_theme::NEON_YELLOW).clicked() {
-                                                    // Trigger Download
-                                                    // Construct ModInfo
-                                                    let mod_info = crate::local_mods_ops::ModInfo {
-                                                        key: res.name.clone(), 
-                                                        name: res.name.clone(),
-                                                        detected_project_id: res.modrinth_id.clone().or_else(|| Some(res.slug.clone())),
-                                                        confirmed_project_id: res.modrinth_id.clone().or_else(|| res.curseforge_id.map(|id| id.to_string())),
-                                                        version_local: Some("".to_string()),
-                                                        version_remote: None,
-                                                        selected: true,
-                                                        file_size_bytes: None,
-                                                        file_mtime_secs: None,
-                                                        depends: None,
-                                                    };
-                                                    // Output folder: depends on source type
-                                                    let output_folder_path = match &self.search_state.source {
-                                                        SearchSource::World(world_name) => {
-                                                            // Datapacks go to saves/{world}/datapacks/
-                                                            PATHS.saves_folder.join(world_name).join("datapacks")
-                                                        },
-                                                        _ => {
-                                                            // Mods go to modpacks folder
-                                                            if let Some(mp) = &self.selected_modpack_ui {
-                                                                PATHS.modpacks_folder.join(mp)
-                                                            } else {
-                                                                crate::local_mods_ops::prepare_output_folder(&self.selected_mc_version);
-                                                                PATHS.modpacks_folder.join(format!(r"mods{}", self.selected_mc_version))
-                                                            }
-                                                        },
-                                                    };
-                                                    let _ = std::fs::create_dir_all(&output_folder_path);
-
-                                                         if self.search_state.download_dependencies {
-                                                        let mod_id_str = res.modrinth_id.clone()
-                                                            .or_else(|| res.curseforge_id.map(|id| id.to_string()))
-                                                            .unwrap_or_else(|| res.slug.clone());
-
-                                                        // Build existing sets from self.mods (selected modpack in-memory — source of truth)
-                                                        let mut existing_project_ids = std::collections::HashSet::new();
-                                                        let mut existing_filenames = std::collections::HashSet::new();
-                                                        for (key, m) in &self.mods {
-                                                            existing_filenames.insert(key.clone());
-                                                            if let Some(id) = &m.confirmed_project_id { existing_project_ids.insert(id.clone()); }
-                                                            if let Some(id) = &m.detected_project_id { existing_project_ids.insert(id.clone()); }
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            match &self.search_state.source {
+                                                SearchSource::Explorer | SearchSource::World(_) => {
+                                                    // In Explorer, we show DL button for this specific version
+                                                    if let Some(status) = self.active_downloads.get(&ver.version_number) { // Using version_number as key temporarily to avoid collision
+                                                        match status {
+                                                            ModStatus::Done => { tui_theme::tui_status(ui, "[OK]", tui_theme::NEON_GREEN); },
+                                                            _ => { tui_theme::tui_status(ui, "[...]", tui_theme::NEON_YELLOW); },
                                                         }
+                                                    } else {
+                                                        if tui_button_c(ui, "DL", tui_theme::NEON_YELLOW).clicked() {
+                                                            // Trigger Download FOR THIS VERSION
+                                                            let mod_info = crate::local_mods_ops::ModInfo {
+                                                                key: ver.version_number.clone(), // Important: Use filename/version string to be unique
+                                                                name: selected_project.name.clone(),
+                                                                detected_project_id: selected_project.modrinth_id.clone().or_else(|| Some(selected_project.slug.clone())),
+                                                                confirmed_project_id: selected_project.modrinth_id.clone().or_else(|| selected_project.curseforge_id.map(|id| id.to_string())),
+                                                                version_local: Some("".to_string()),
+                                                                version_remote: None,
+                                                                selected: true,
+                                                                file_size_bytes: None,
+                                                                file_mtime_secs: None,
+                                                                depends: None,
+                                                            };
+                                                            
+                                                            let output_folder_path = match &self.search_state.source {
+                                                                SearchSource::World(world_name) => PATHS.saves_folder.join(world_name).join("datapacks"),
+                                                                _ => if let Some(mp) = &self.selected_modpack_ui {
+                                                                    PATHS.modpacks_folder.join(mp)
+                                                                } else {
+                                                                    crate::local_mods_ops::prepare_output_folder(&self.selected_mc_version);
+                                                                    PATHS.modpacks_folder.join(format!(r"mods{}", self.selected_mc_version))
+                                                                },
+                                                            };
+                                                            let _ = std::fs::create_dir_all(&output_folder_path);
 
-                                                        let _ = self.tx_resolve_deps.send((
-                                                            res.name.clone(),
-                                                            mod_id_str,
-                                                            self.search_state.version.clone(),
-                                                            self.search_state.loader.clone(),
-                                                            output_folder_path.to_string_lossy().to_string(),
-                                                            existing_project_ids,
-                                                            existing_filenames,
-                                                        ));
+                                                            // Handle dependencies
+                                                            let mut existing_project_ids = std::collections::HashSet::new();
+                                                            if self.search_state.download_dependencies {
+                                                                for m in self.mods.values() {
+                                                                    if let Some(id) = &m.confirmed_project_id { existing_project_ids.insert(id.clone()); }
+                                                                    if let Some(id) = &m.detected_project_id { existing_project_ids.insert(id.clone()); }
+                                                                }
+                                                            }
+                                                            
+                                                            let job = DownloadJob {
+                                                                key: ver.version_number.clone(),
+                                                                modinfo: mod_info.clone(),
+                                                                output_folder: output_folder_path.to_string_lossy().to_string(),
+                                                                selected_version: ver.id.clone(), // EXACT VERSION ID
+                                                                selected_loader: self.search_state.loader.clone(),
+                                                                content_type: self.search_state.content_type,
+                                                                replaces_filename: None,
+                                                                raw_game_version: self.search_state.version.clone(),
+                                                            };
+                                                            
+                                                            let _ = self.tx_prepare_downloads.send((
+                                                                job,
+                                                                self.search_state.download_dependencies,
+                                                                existing_project_ids,
+                                                            ));
+                                                            self.active_downloads.insert(ver.version_number.clone(), ModStatus::Resolving);
+                                                        }
                                                     }
-                                                    
-                                                    // ALWAYS download the searched mod
-                                                    let job = DownloadJob {
-                                                        key: res.name.clone(),
-                                                        modinfo: mod_info.clone(),
-                                                        output_folder: output_folder_path.to_string_lossy().to_string(),
-                                                        selected_version: self.search_state.version.clone(), // Use search version
-                                                        selected_loader: self.search_state.loader.clone(), // Use search loader
-                                                        content_type: self.search_state.content_type,
-                                                    };
-                                                    let _ = self.tx_jobs.send(job);
-                                                    
-                                                    // Mark as resolving locally
-                                                    self.active_downloads.insert(res.name.clone(), ModStatus::Resolving);
+                                                },
+                                                SearchSource::Profile(_p_name) => {
+                                                    if tui_button_c(ui, "ADD", tui_theme::NEON_GREEN).clicked() {
+                                                         // Future Profile version selection implementation
+                                                    }
                                                 }
                                             }
-                                        },
-                                        SearchSource::Profile(p_name) => {
-                                            // Check if mod is already in the profile
-                                            let res_id = res.modrinth_id.clone()
-                                                .or_else(|| res.curseforge_id.map(|id| id.to_string()))
-                                                .unwrap_or_default();
-                                            let already_in_profile = self.profiles_db.get_profile(p_name)
-                                                .map_or(false, |p| p.contains_mod(&res.name, &res_id, &res.slug));
-
-                                            if already_in_profile {
-                                                tui_theme::tui_status(ui, "[OK]", tui_theme::NEON_GREEN);
-                                            } else if tui_button_c(ui, "ADD", tui_theme::NEON_GREEN).clicked() {
-                                                let project_id = res.modrinth_id.clone()
-                                                    .or_else(|| res.curseforge_id.map(|id| id.to_string()));
-                                                if let Some(profile) = self.profiles_db.get_profile_mut(p_name) {
-                                                    let mod_info = crate::local_mods_ops::ModInfo::from_search(
-                                                        res.name.clone(), project_id.clone(),
-                                                    );
-                                                    profile.mods.insert(res.name.clone(), mod_info);
-                                                }
-                                                save_profiles(&self.profiles_db);
-                                                self.status_msg = format!("Mod '{}' añadido al perfil.", res.name);
-
-                                                // Auto-add dependencies if checkbox is active
-                                                if self.search_state.download_dependencies {
-                                                    let mod_id = res.modrinth_id.clone()
-                                                        .or_else(|| res.curseforge_id.map(|id| id.to_string()))
-                                                        .unwrap_or_else(|| res.slug.clone());
-
-                                                    // Build set of project_ids already in profile
-                                                    let existing_ids: std::collections::HashSet<String> = {
-                                                        if let Some(profile) = self.profiles_db.get_profile(p_name) {
-                                                            profile.mods.values().flat_map(|m| {
-                                                                m.confirmed_project_id.iter().chain(m.detected_project_id.iter()).cloned()
-                                                            }).collect()
-                                                        } else { std::collections::HashSet::new() }
-                                                    };
-
-                                                    let _ = self.tx_resolve_profile_deps.send((
-                                                        mod_id,
-                                                        p_name.clone(),
-                                                        self.search_state.version.clone(),
-                                                        self.search_state.loader.clone(),
-                                                        existing_ids,
-                                                    ));
-                                                }
-                                            }
-                                        }
-
-                                    }
+                                        });
+                                    });
                                 });
-                            });
+                            }
                         });
                     }
-                    
-                    if !self.search_state.results.is_empty() {
-                        ui.add_space(10.0);
-                        if self.search_state.is_searching {
-                            ui.spinner();
-                        } else {
-                            if tui_button(ui, "MAS").clicked() {
-                                self.search_state.is_searching = true;
-                                self.search_state.page += 1;
-                                let offset = self.search_state.page * self.search_state.limit;
-                                
-                                let is_explorer = matches!(self.search_state.source, SearchSource::Explorer | SearchSource::World(_));
-                                let supports_loader = self.search_state.content_type == ContentType::Mod;
-                                let (loader, version) = if is_explorer {
-                                    (
-                                        if supports_loader { Some(self.search_state.loader.clone()) } else { None },
-                                        Some(self.search_state.version.clone()),
-                                    )
-                                } else {
-                                    (None, None)
-                                };
 
-                                let req = SearchRequest {
-                                    query: self.search_state.query.clone(),
-                                    loader,
-                                    version,
-                                    offset,
-                                    limit: self.search_state.limit,
-                                    content_type: self.search_state.content_type,
-                                };
-                                let _ = self.tx_search.send((req, self.search_state.source.clone()));
+                } else {
+                    // --- SEARCH RESULTS VIEW (Existing code) ---
+                    egui::ScrollArea::vertical().max_height(450.0).show(ui, |ui| {
+                        for res in &self.search_state.results {
+                            let shape_idx = ui.painter().add(egui::Shape::Noop);
+                            let group_res = ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    // 1. Image on the left
+                                    if let Some(icon_url) = &res.icon_url {
+                                        let img = egui::Image::new(icon_url)
+                                            .fit_to_exact_size(egui::vec2(48.0, 48.0))
+                                            .corner_radius(4.0);
+                                        ui.add(img);
+                                    } else {
+                                        ui.allocate_space(egui::vec2(48.0, 48.0));
+                                    }
+
+                                    ui.add_space(8.0); // Spacing between image and text
+                                    
+                                    // 2. Middle section: text (occupies remaining width and aligns left)
+                                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                                        ui.set_width(ui.available_width());
+                                        
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new(&res.name)
+                                                .family(egui::FontFamily::Monospace)
+                                                .color(tui_theme::TEXT_PRIMARY).strong());
+                                            
+                                            if res.modrinth_id.is_some() { tui_theme::tui_status(ui, "[MR]", tui_theme::NEON_GREEN); }
+                                            if res.curseforge_id.is_some() { tui_theme::tui_status(ui, "[CF]", tui_theme::NEON_YELLOW); }
+                                        });
+                                        
+                                        tui_dim(ui, &res.author);
+                                        
+                                        ui.add(egui::Label::new(
+                                            egui::RichText::new(&res.description)
+                                                .family(egui::FontFamily::Monospace)
+                                                .color(tui_theme::TEXT_DIM)
+                                                .size(11.0)
+                                        ).truncate());
+                                    });
+                                });
+                            });
+
+                            let interact = ui.interact(group_res.response.rect, ui.id().with(&res.slug), egui::Sense::click());
+                            
+                            if interact.hovered() {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                ui.painter().set(
+                                    shape_idx, 
+                                    egui::Shape::rect_filled(group_res.response.rect, 0.0, tui_theme::BG_HOVER)
+                                );
+                            }
+
+                            if interact.clicked() {
+                                self.search_state.selected_project_for_versions = Some(res.clone());
+                                self.search_state.is_fetching_versions = true;
+                                self.search_state.project_versions_results.clear();
+
+                                let project_id = res.modrinth_id.clone()
+                                    .or_else(|| res.curseforge_id.map(|id| id.to_string()))
+                                    .unwrap_or_else(|| res.slug.clone());
+
+                                let _ = self.tx_fetch_versions.send((
+                                    project_id,
+                                    self.search_state.loader.clone(),
+                                    self.search_state.version.clone(),
+                                    self.search_state.content_type,
+                                ));
                             }
                         }
-                    }
-                });
+                        
+                        if !self.search_state.results.is_empty() {
+                            ui.add_space(10.0);
+                            if self.search_state.is_searching {
+                                ui.spinner();
+                            } else {
+                                if tui_button(ui, "MAS").clicked() {
+                                    self.search_state.is_searching = true;
+                                    self.search_state.page += 1;
+                                    let offset = self.search_state.page * self.search_state.limit;
+                                    
+                                    let is_explorer = matches!(self.search_state.source, SearchSource::Explorer | SearchSource::World(_));
+                                    let supports_loader = self.search_state.content_type == ContentType::Mod;
+                                    let (loader, version) = if is_explorer {
+                                        (
+                                            if supports_loader { Some(self.search_state.loader.clone()) } else { None },
+                                            Some(self.search_state.version.clone()),
+                                        )
+                                    } else {
+                                        (None, None)
+                                    };
 
-            });
-        
-        self.search_state.open = open;
+                                    let req = SearchRequest {
+                                        query: self.search_state.query.clone(),
+                                        loader,
+                                        version,
+                                        offset,
+                                        limit: self.search_state.limit,
+                                        content_type: self.search_state.content_type,
+                                    };
+                                    let _ = self.tx_search.send((req, self.search_state.source.clone()));
+                                }
+                            }
+                        }
+                    });
+                }
     }
 }

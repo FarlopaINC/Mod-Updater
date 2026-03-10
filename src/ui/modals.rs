@@ -6,7 +6,7 @@ use crate::profiles::{Profile, save_profiles};
 use crate::fetch::async_download::DownloadJob;
 use crate::paths_vars::PATHS;
 use super::tui_theme::{self, tui_button_c, tui_separator, tui_dim, tui_number, tui_heading};
-use super::types::{DeletionConfirmation, DownloadSource, ModStatus, AppTab};
+use super::types::{DeletionConfirmation, DownloadSource, ModStatus, AppTab, DownloadAction};
 
 impl super::app::ModUpdaterApp {
     pub(crate) fn render_deletion_modal(&mut self, ctx: &egui::Context) {
@@ -183,6 +183,8 @@ impl super::app::ModUpdaterApp {
                                                     selected_version: self.selected_mc_version.clone(),
                                                     selected_loader: self.selected_loader.clone(),
                                                     content_type: crate::fetch::search_provider::ContentType::Mod,
+                                                    replaces_filename: None,
+                                                    raw_game_version: self.selected_mc_version.clone(),
                                                 };
                                                 let _ = self.tx_jobs.send(job);
                                                 count += 1;
@@ -199,6 +201,8 @@ impl super::app::ModUpdaterApp {
                                                     selected_version: self.selected_mc_version.clone(),
                                                     selected_loader: self.selected_loader.clone(),
                                                     content_type: crate::fetch::search_provider::ContentType::Mod,
+                                                    replaces_filename: None,
+                                                    raw_game_version: self.selected_mc_version.clone(),
                                                 };
                                                 let _ = self.tx_jobs.send(job);
                                                 count += 1;
@@ -343,6 +347,140 @@ impl super::app::ModUpdaterApp {
             } else {
                 // write back changes to text field
                 self.create_profile_modal_name = Some(name);
+            }
+        }
+    }
+
+    pub(crate) fn render_duplicate_resolution_modal(&mut self, ctx: &egui::Context) {
+        if let Some(mut resolutions) = self.pending_downloads.take() {
+            let mut open = true;
+            let mut close_requested = false;
+            let mut start_downloads = false;
+
+            egui::Window::new("CONFIRMAR DESCARGAS")
+                .collapsible(false)
+                .resizable(false)
+                .open(&mut open)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(ctx, |ui| {
+                    tui_heading(ui, "Resolución de dependencias y duplicados");
+                    ui.add_space(8.0);
+
+                    let mut apply_all_action = None;
+
+                    egui::ScrollArea::vertical()
+                        .max_height(350.0)
+                        .show(ui, |ui| {
+                            for res in resolutions.iter_mut() {
+                                ui.group(|ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.vertical(|ui| {
+                                            ui.label(egui::RichText::new(&res.download_job.key)
+                                                .family(egui::FontFamily::Monospace)
+                                                .color(tui_theme::TEXT_PRIMARY)
+                                                .strong());
+
+                                            if let Some(old_name) = &res.existing_filename {
+                                                let old_v = res.existing_version.as_deref().unwrap_or("?");
+                                                let new_v = res.modinfo.version_remote.as_deref().unwrap_or("?");
+                                                tui_dim(ui, &format!("Existente: {} ({}) -> Nuevo: {}", old_name, old_v, new_v));
+                                            } else {
+                                                let new_v = res.modinfo.version_remote.as_deref().unwrap_or("?");
+                                                tui_dim(ui, &format!("Nuevo: v{}", new_v));
+                                            }
+                                        });
+
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            if matches!(res.status, ModStatus::Idle | ModStatus::Error(_)) {
+                                                ui.radio_value(&mut res.action, DownloadAction::Install, "Instalar");
+                                                if res.existing_filename.is_some() {
+                                                    ui.radio_value(&mut res.action, DownloadAction::Replace, "Reemplazar");
+                                                }
+                                                ui.radio_value(&mut res.action, DownloadAction::Skip, "Ignorar");
+                                            } else {
+                                                // Show progress
+                                                match &res.status {
+                                                    ModStatus::Resolving => tui_theme::tui_status(ui, "Resolviendo...", tui_theme::NEON_YELLOW),
+                                                    ModStatus::Downloading(p) => tui_theme::tui_status(ui, &format!("Descargando [{:>3.0}%]", p * 100.0), tui_theme::NEON_YELLOW),
+                                                    ModStatus::Done => tui_theme::tui_status(ui, "Completado", tui_theme::NEON_GREEN),
+                                                    ModStatus::Error(e) => tui_theme::tui_status(ui, &format!("Error: {}", e), tui_theme::NEON_RED),
+                                                    _ => {}
+                                                }
+                                            }
+                                        });
+                                    });
+                                });
+                            }
+                        });
+
+                    ui.add_space(10.0);
+                    tui_separator(ui);
+                    ui.add_space(5.0);
+
+                    // Global actions
+                    ui.horizontal(|ui| {
+                        tui_dim(ui, "Aplicar a todos:");
+                        if ui.button("Instalar").clicked() { apply_all_action = Some(DownloadAction::Install); }
+                        if ui.button("Reemplazar").clicked() { apply_all_action = Some(DownloadAction::Replace); }
+                        if ui.button("Ignorar").clicked() { apply_all_action = Some(DownloadAction::Skip); }
+                    });
+
+                    if let Some(action) = apply_all_action {
+                        for res in resolutions.iter_mut() {
+                            if matches!(res.status, ModStatus::Idle | ModStatus::Error(_)) {
+                                // Only allow Replace if there's actually an existing file
+                                if action == DownloadAction::Replace && res.existing_filename.is_none() {
+                                    res.action = DownloadAction::Install;
+                                } else {
+                                    res.action = action.clone();
+                                }
+                            }
+                        }
+                    }
+
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if tui_button_c(ui, "CERRAR", tui_theme::NEON_RED).clicked() {
+                            close_requested = true;
+                        }
+
+                        let pending = resolutions.iter().any(|r| matches!(r.status, ModStatus::Resolving | ModStatus::Downloading(_)));
+                        if pending {
+                            tui_dim(ui, "   Espere...");
+                        } else {
+                            if tui_button_c(ui, "APLICAR", tui_theme::NEON_GREEN).clicked() {
+                                start_downloads = true;
+                            }
+                        }
+                    });
+                });
+
+            if start_downloads {
+                for res in resolutions.iter_mut() {
+                    if matches!(res.status, ModStatus::Idle | ModStatus::Error(_)) {
+                        match res.action {
+                            DownloadAction::Skip => {
+                                res.status = ModStatus::Done;
+                            }
+                            DownloadAction::Install | DownloadAction::Replace => {
+                                res.status = ModStatus::Resolving;
+                                // Need to enqueue download job.
+                                // It will be processed asynchronously by tx_jobs.
+                                let mut job = res.download_job.clone();
+                                if res.action == DownloadAction::Replace {
+                                    job.replaces_filename = res.existing_filename.clone();
+                                }
+                                let _ = self.tx_jobs.send(job);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !open || close_requested {
+                self.pending_downloads = None;
+            } else {
+                self.pending_downloads = Some(resolutions);
             }
         }
     }

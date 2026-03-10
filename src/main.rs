@@ -18,7 +18,10 @@ fn main() {
     let _ = eframe::run_native(
         "Mods Updater",
         options,
-        Box::new(|cc| Ok(Box::new(ModUpdaterApp::new(cc)))),
+        Box::new(|cc| {
+            egui_extras::install_image_loaders(&cc.egui_ctx);
+            Ok(Box::new(ModUpdaterApp::new(cc)))
+        }),
     );
 }
  

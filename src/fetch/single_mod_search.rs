@@ -69,4 +69,17 @@ impl ContentSearchProvider for ModSearchProvider {
 
     fn supports_loader_filter(&self) -> bool { true }
     fn supports_version_filter(&self) -> bool { true }
+
+    fn fetch_versions(&self, project_id: &str, loader: &str, game_version: &str) -> Vec<crate::fetch::search_provider::ProjectVersion> {
+        // Try parsing project_id as u32 to see if it's CurseForge
+        if let Ok(cf_id) = project_id.parse::<u32>() {
+            let cf_key = crate::fetch::cf_api_key();
+            if !cf_key.is_empty() {
+                return curseforge_api::fetch_curseforge_project_versions(cf_id, game_version, loader, &cf_key, &ContentType::Mod);
+            }
+        }
+        
+        // Otherwise assume Modrinth
+        modrinth_api::fetch_modrinth_project_versions(project_id, loader, game_version, &ContentType::Mod)
+    }
 }

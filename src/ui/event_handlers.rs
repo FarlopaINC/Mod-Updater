@@ -2,7 +2,7 @@ use crate::local_mods_ops::ReadEvent;
 use crate::local_datapacks_ops::{DatapackReadEvent, DatapackInfo};
 use crate::fetch::async_download::DownloadEvent;
 use crate::profiles::save_profiles;
-use super::types::{ModStatus, UiModInfo};
+use crate::ui::types::{ModStatus, UiModInfo, DownloadAction, DuplicateResolution};
 use indexmap::IndexMap;
 
 impl super::app::ModUpdaterApp {
@@ -130,12 +130,41 @@ impl super::app::ModUpdaterApp {
             self.search_state.is_searching = false;
         }
 
-        // --- Dependency Resolution Results Poll ---
-        // When the resolver thread finishes, update the matching search card with dep names
-        while let Ok((mod_key, dep_names)) = self.rx_dep_resolved.try_recv() {
-            if let Some(result) = self.search_state.results.iter_mut().find(|r| r.name == mod_key) {
-                result.dependencies = Some(dep_names);
+        // --- Phase 2: Handle Dependency Processing Results ---
+        // Converts the returned list of DownloadJobs into DuplicateResolutions for the popup modal
+        while let Ok(jobs) = self.rx_prepare_downloads_result.try_recv() {
+            let mut resolutions = Vec::new();
+            for job in jobs {
+                let pid1 = job.modinfo.confirmed_project_id.clone();
+                let pid2 = job.modinfo.detected_project_id.clone();
+                
+                let mut existing_filename = None;
+                let mut existing_version = None;
+                let mut action = DownloadAction::Install;
+                
+                // Compare with local mods to find duplicates
+                if pid1.is_some() || pid2.is_some() {
+                    if let Some((_, m)) = self.mods.iter().find(|(_, m)| {
+                        (pid1.is_some() && m.confirmed_project_id == pid1) ||
+                        (pid2.is_some() && m.detected_project_id == pid2)
+                    }) {
+                        existing_filename = Some(m.key.clone());
+                        existing_version = m.version_local.clone();
+                        action = DownloadAction::Skip; // By default skip if duplicate
+                    }
+                }
+                
+                resolutions.push(DuplicateResolution {
+                    modinfo: job.modinfo.clone(),
+                    download_job: job,
+                    existing_filename,
+                    existing_version,
+                    action,
+                    status: ModStatus::Idle,
+                });
             }
+            // Triggers the modal open because pending_downloads is now Some(_)
+            self.pending_downloads = Some(resolutions);
         }
 
         // --- Dep-Name Preview Results Poll ---
@@ -160,6 +189,12 @@ impl super::app::ModUpdaterApp {
                 save_profiles(&self.profiles_db);
                 self.status_msg = format!("Dependencias añadidas al perfil '{}'.", profile_name);
             }
+        }
+
+        // --- Fetch Versions Results Poll ---
+        while let Ok(versions) = self.rx_versions_result.try_recv() {
+            self.search_state.project_versions_results = versions;
+            self.search_state.is_fetching_versions = false;
         }
     }
 }

@@ -9,6 +9,11 @@ use crate::fetch::search_provider::ContentType;
 
 #[derive(Debug, Deserialize)]
 pub struct ModrinthVersion {
+    pub id: String,
+    pub name: String,
+    pub version_number: String,
+    pub version_type: String,
+    pub date_published: String,
     pub files: Vec<ModFile>,
     pub game_versions: Vec<String>,
     pub loaders: Vec<String>,
@@ -242,6 +247,60 @@ pub fn fetch_modrinth_version(mod_id: &str, version: &str, loader: &str, content
         Err(e) => {
             println!("❌ Error consultando API de Modrinth: {}", e);
             return None;
+        }
+    }
+}
+
+pub fn fetch_modrinth_project_versions(mod_id: &str, loader: &str, game_version: &str, content_type: &ContentType) -> Vec<crate::fetch::search_provider::ProjectVersion> {
+    let client = &*MODRINTH_CLIENT;
+    let api_url = format!("https://api.modrinth.com/v2/project/{}/version", mod_id);
+
+    let effective_loader = match content_type {
+        ContentType::Datapack => "datapack",
+        _ => loader,
+    };
+
+    let loaders_json = json!([effective_loader.to_lowercase()]).to_string();
+    let versions_json = json!([game_version]).to_string();
+
+    let params = [
+        ("loaders", &loaders_json),
+        ("game_versions", &versions_json),
+    ];
+
+    wait_for_ratelimit();
+
+    match client.get(&api_url).query(&params).send() {
+        Ok(resp) => {
+            update_ratelimit(resp.headers());
+            if resp.status().is_success() {
+                let versions: Vec<ModrinthVersion> = resp.json().unwrap_or_default();
+                versions.into_iter().take(10).map(|mv| {
+                    let r_type = match mv.version_type.as_str() {
+                        "release" => "R".to_string(),
+                        "beta" => "B".to_string(),
+                        "alpha" => "A".to_string(),
+                        _ => "O".to_string(),
+                    };
+                    // Date parsing to just "YYYY-MM-DD"
+                    let date = mv.date_published.split('T').next().unwrap_or(&mv.date_published).to_string();
+                    crate::fetch::search_provider::ProjectVersion {
+                        id: mv.id,
+                        name: mv.name,
+                        version_number: mv.version_number,
+                        release_type: r_type,
+                        game_versions: mv.game_versions,
+                        date_published: date,
+                    }
+                }).collect()
+            } else {
+                println!("❌ Error en API (versiones) para {}: status {}", mod_id, resp.status());
+                Vec::new()
+            }
+        }
+        Err(e) => {
+            println!("❌ Error consultando API de Modrinth: {}", e);
+            Vec::new()
         }
     }
 }

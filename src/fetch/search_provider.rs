@@ -64,6 +64,16 @@ pub struct UnifiedSearchResult {
     pub content_type: ContentType,
 }
 
+#[derive(Debug, Clone)]
+pub struct ProjectVersion {
+    pub id: String,          // The version ID (Modrinth version ID, CurseForge file ID)
+    pub name: String,        // Version name (e.g. "Sodium 0.5.3")
+    pub version_number: String, // e.g. "0.5.3"
+    pub release_type: String, // 'R' for release, 'B' for beta, 'A' for alpha
+    pub game_versions: Vec<String>, // e.g. ["1.20.1"]
+    pub date_published: String, // Displayable date
+}
+
 /// Trait que define lo que debe implementar cada tipo de contenido buscable.
 /// Equivalente a una clase abstracta en C++.
 pub trait ContentSearchProvider: Send + Sync {
@@ -78,4 +88,11 @@ pub trait ContentSearchProvider: Send + Sync {
 
     /// Si el tipo soporta filtrar por versión de MC
     fn supports_version_filter(&self) -> bool;
+
+    /// Recupera las versiones de un proyecto específico (para la selección manual)
+    fn fetch_versions(&self, project_id: &str, loader: &str, game_version: &str) -> Vec<ProjectVersion> {
+        // Implementación por defecto retorna vacío (hasta que los modifiquen)
+        let _ = (project_id, loader, game_version);
+        Vec::new()
+    }
 }

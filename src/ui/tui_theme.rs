@@ -7,8 +7,8 @@ use egui::{Color32, CornerRadius, FontFamily, FontId, Stroke, Visuals, Vec2};
 
 pub const BG_PRIMARY:   Color32 = Color32::from_rgb(0x0d, 0x11, 0x17); // Fondo principal
 pub const BG_SECONDARY: Color32 = Color32::from_rgb(0x16, 0x1b, 0x22); // Paneles secundarios
-pub const BG_HOVER:     Color32 = Color32::from_rgb(0x21, 0x26, 0x2d); // Hover
-pub const BG_ACTIVE:    Color32 = Color32::from_rgb(0x30, 0x36, 0x3d); // Active/Selected
+pub const BG_HOVER:     Color32 = Color32::from_rgba_premultiplied(40, 40, 40, 40); // Hover - Terminal selection style (white with alpha 40)
+pub const BG_ACTIVE:    Color32 = Color32::from_rgba_premultiplied(80, 80, 80, 80); // Active/Selected - Terminal selection style (white with alpha 80)
 
 pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(0xc9, 0xd1, 0xd9); // Texto principal
 pub const TEXT_DIM:     Color32 = Color32::from_rgb(0x6e, 0x76, 0x81); // Texto secundario
@@ -50,8 +50,8 @@ pub fn apply_tui_theme(ctx: &egui::Context) {
     style.text_styles.insert(egui::TextStyle::Monospace, FontId::new(13.0, FontFamily::Monospace));
 
     // Spacing
-    style.spacing.item_spacing = Vec2::new(6.0, 3.0);
-    style.spacing.button_padding = Vec2::new(6.0, 2.0);
+    style.spacing.item_spacing = Vec2::new(4.0, 3.0);
+    style.spacing.button_padding = Vec2::new(2.0, 2.0);
     style.spacing.window_margin = egui::Margin::same(8);
 
     ctx.set_style(style);
@@ -67,10 +67,10 @@ pub fn apply_tui_theme(ctx: &egui::Context) {
 
     // Zero rounding on all widgets
     visuals.widgets.inactive.corner_radius = CornerRadius::ZERO;
-    visuals.widgets.inactive.bg_fill = BG_SECONDARY;
+    visuals.widgets.inactive.bg_fill = Color32::TRANSPARENT;
     visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, TEXT_PRIMARY);
     visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, BORDER);
-    visuals.widgets.inactive.weak_bg_fill = BG_SECONDARY;
+    visuals.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
 
     visuals.widgets.hovered.corner_radius = CornerRadius::ZERO;
     visuals.widgets.hovered.bg_fill = BG_HOVER;
@@ -97,7 +97,7 @@ pub fn apply_tui_theme(ctx: &egui::Context) {
     visuals.widgets.noninteractive.weak_bg_fill = BG_PRIMARY;
 
     // Selection — fondo sólido oscuro para que el texto se lea bien
-    visuals.selection.bg_fill = Color32::from_rgb(0x0a, 0x3d, 0x5c); // Azul oscuro sólido
+    visuals.selection.bg_fill = Color32::from_rgba_premultiplied(80, 80, 80, 80); // Terminal text selection style
     visuals.selection.stroke = Stroke::new(1.0, ACCENT_DIM);
 
     // Text colors
@@ -120,7 +120,6 @@ pub fn tui_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
         .family(FontFamily::Monospace)
         .color(ACCENT);
     ui.add(egui::Button::new(text)
-        .fill(Color32::TRANSPARENT)
         .stroke(Stroke::NONE)
         .corner_radius(CornerRadius::ZERO))
 }
@@ -131,7 +130,6 @@ pub fn tui_button_c(ui: &mut egui::Ui, label: &str, color: Color32) -> egui::Res
         .family(FontFamily::Monospace)
         .color(color);
     ui.add(egui::Button::new(text)
-        .fill(Color32::TRANSPARENT)
         .stroke(Stroke::NONE)
         .corner_radius(CornerRadius::ZERO))
 }
@@ -152,7 +150,6 @@ pub fn tui_checkbox(ui: &mut egui::Ui, checked: &mut bool) -> egui::Response {
         .family(FontFamily::Monospace)
         .color(if *checked { ACCENT } else { TEXT_DIM });
     let resp = ui.add(egui::Button::new(text)
-        .fill(Color32::TRANSPARENT)
         .stroke(Stroke::NONE)
         .corner_radius(CornerRadius::ZERO));
     if resp.clicked() {
@@ -204,10 +201,19 @@ pub fn tui_tab(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response
             .family(FontFamily::Monospace)
             .color(TEXT_DIM)
     };
-    ui.add(egui::Button::new(text)
-        .fill(Color32::TRANSPARENT)
-        .stroke(Stroke::NONE)
-        .corner_radius(CornerRadius::ZERO))
+    
+    // For selected tabs, we want it to look active. `Button` is inactive by default. 
+    // We can explicitly use `SelectableLabel` for tabs, or just a Button that we override if selected.
+    if selected {
+        ui.add(egui::Button::new(text)
+            .selected(true)
+            .stroke(Stroke::NONE)
+            .corner_radius(CornerRadius::ZERO))
+    } else {
+        ui.add(egui::Button::new(text)
+            .stroke(Stroke::NONE)
+            .corner_radius(CornerRadius::ZERO))
+    }
 }
 
 /// Texto con color dim para info secundaria

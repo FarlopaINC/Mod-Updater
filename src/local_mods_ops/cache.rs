@@ -33,7 +33,6 @@ pub fn init() -> bool {
     } else {
         db_path.push("mods_cache_v2.redb");
     }
-
     init_with_path(db_path)
 }
 

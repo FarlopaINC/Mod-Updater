@@ -36,7 +36,10 @@ pub struct CurseLinks {
 #[serde(rename_all = "camelCase")]
 pub struct CurseFile {
     pub id: u32,
+    pub display_name: String,
     pub file_name: String,
+    pub file_date: String,
+    pub release_type: u32, // 1=Release, 2=Beta, 3=Alpha
     pub download_url: Option<String>,
     pub game_versions: Vec<String>,
     pub mod_loaders: Vec<String>,
@@ -258,3 +261,68 @@ pub fn fetch_curseforge_version_file(mod_id: u32, game_version: &str, loader: &s
     }
 }
 
+pub fn fetch_curseforge_project_versions(mod_id: u32, game_version: &str, loader: &str, api_key: &str, content_type: &ContentType) -> Vec<crate::fetch::search_provider::ProjectVersion> {
+    let client = build_curse_client(api_key);
+    let api_url = format!("https://api.curseforge.com/v1/mods/{}/files", mod_id);
+
+    // Map loader to CurseForge ID
+    let loader_type = match content_type {
+        ContentType::Datapack => "0",
+        _ => match loader.to_lowercase().as_str() {
+            "any" => "0",
+            "forge" => "1",
+            "cauldron" => "2",
+            "liteloader" => "3",
+            "fabric" => "4",
+            "quilt" => "5",
+            "neoforge" => "6",
+            _ => "4",
+        },
+    };
+
+    let params = [
+        ("gameVersion", game_version),
+        ("modLoaderType", loader_type),
+    ];
+
+    wait_for_ratelimit();
+
+    match client.get(&api_url).query(&params).send() {
+        Ok(resp) => {
+            if resp.status().is_success() {
+                let files: ApiResponse<Vec<CurseFile>> = resp.json().unwrap_or(ApiResponse { data: vec![] });
+                let target_ext = match content_type {
+                    ContentType::Datapack => ".zip",
+                    _ => ".jar",
+                };
+                files.data.into_iter()
+                    .filter(|f| f.file_name.to_lowercase().ends_with(target_ext))
+                    .take(10)
+                    .map(|f| {
+                        let r_type = match f.release_type {
+                            1 => "R".to_string(),
+                            2 => "B".to_string(),
+                            3 => "A".to_string(),
+                            _ => "O".to_string(),
+                        };
+                        let date = f.file_date.split('T').next().unwrap_or(&f.file_date).to_string();
+                        crate::fetch::search_provider::ProjectVersion {
+                            id: f.id.to_string(),
+                            name: f.display_name,
+                            version_number: f.file_name,
+                            release_type: r_type,
+                            game_versions: f.game_versions,
+                            date_published: date,
+                        }
+                    }).collect()
+            } else {
+                println!("❌ Error en API CurseForge para {}: status {}", mod_id, resp.status());
+                Vec::new()
+            }
+        }
+        Err(e) => {
+            println!("❌ Error consultando API de CurseForge: {}", e);
+            Vec::new()
+        }
+    }
+}

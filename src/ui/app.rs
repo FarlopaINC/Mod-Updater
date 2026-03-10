@@ -75,10 +75,11 @@ pub struct ModUpdaterApp {
     pub(crate) rx_search: Receiver<(Vec<UnifiedSearchResult>, SearchSource, u32)>, // Results, Source, Offset
 
     // --- Dependency Resolution State ---
-    // (mod_key, project_id, version, loader, output_folder, existing_project_ids, existing_filenames)
-    pub(crate) tx_resolve_deps: Sender<(String, String, String, String, String, std::collections::HashSet<String>, std::collections::HashSet<String>)>,
-    // Returns (mod_key, list_of_dep_display_names) so the search card can update
-    pub(crate) rx_dep_resolved: Receiver<(String, Vec<String>)>,
+    // (main_job, resolve_deps, existing_project_ids)
+    pub(crate) tx_prepare_downloads: Sender<(DownloadJob, bool, std::collections::HashSet<String>)>,
+    // Returns final list of jobs (main + deps)
+    pub(crate) rx_prepare_downloads_result: Receiver<Vec<DownloadJob>>,
+    pub(crate) pending_downloads: Option<Vec<crate::ui::types::DuplicateResolution>>,
 
     // --- Profile Dependency Resolution ---
     // (project_id, profile_name, version, loader, existing_project_ids)
@@ -98,6 +99,12 @@ pub struct ModUpdaterApp {
     pub(crate) tx_dp_read_jobs: Sender<DatapackReadJob>,
     pub(crate) rx_dp_read_events: Receiver<DatapackReadEvent>,
     pub(crate) datapacks_loaded: bool,
+
+    // --- Version Fetching State ---
+    // (project_id, loader, version, content_type)
+    pub(crate) tx_fetch_versions: Sender<(String, String, String, ContentType)>,
+    // Returns Vec of versions
+    pub(crate) rx_versions_result: Receiver<Vec<crate::fetch::search_provider::ProjectVersion>>,
 }
 
 impl ModUpdaterApp {
@@ -202,67 +209,62 @@ impl ModUpdaterApp {
             crate::local_mods_ops::cache::clean_cache();
         });
 
-        // --- Dependency Resolver ---
-        // Channel: UI → Resolver
-        let (tx_resolve_deps, rx_resolve_deps) = unbounded::<(String, String, String, String, String, std::collections::HashSet<String>, std::collections::HashSet<String>)>();
-        // Channel: Resolver → UI (dep names discovered, to update search card)
-        let (tx_dep_resolved, rx_dep_resolved) = unbounded::<(String, Vec<String>)>();
+        // --- Dependency Resolver for Downloads ---
+        let (tx_prepare_downloads, rx_prepare_downloads) = unbounded::<(DownloadJob, bool, std::collections::HashSet<String>)>();
+        let (tx_download_resolutions, rx_prepare_downloads_result) = unbounded::<Vec<DownloadJob>>();
 
         {
-            let tx_jobs_clone = tx_jobs.clone();
-            let tx_dep_res = tx_dep_resolved.clone();
             thread::spawn(move || {
-                while let Ok((mod_key, project_id, version, loader, output_folder, existing_ids, existing_filenames)) = rx_resolve_deps.recv() {
-                    println!("🔍 Resolviendo dependencias transitivas para {}...", mod_key);
-                    let cf_key = crate::fetch::cf_api_key();
+                while let Ok((main_job, resolve_deps, existing_ids)) = rx_prepare_downloads.recv() {
+                    let mut final_jobs = vec![main_job.clone()];
+                    
+                    if resolve_deps {
+                        let project_id_opt = main_job.modinfo.confirmed_project_id.as_ref()
+                            .or(main_job.modinfo.detected_project_id.as_ref());
+                            
+                        if let Some(project_id) = project_id_opt {
+                            println!("🔍 Resolviendo dependencias para {}...", main_job.key);
+                            let cf_key = crate::fetch::cf_api_key();
+                            
+                            let dep_infos = crate::fetch::fetch_from_api::resolve_all_dependencies(
+                                project_id,
+                                &main_job.raw_game_version, // Use actual Minecraft version here
+                                &main_job.selected_loader,
+                                &cf_key,
+                                &existing_ids,
+                            );
 
-                    let dep_infos = crate::fetch::fetch_from_api::resolve_all_dependencies(
-                        &project_id,
-                        &version,
-                        &loader,
-                        &cf_key,
-                        &existing_ids,
-                    );
-
-                    // Filter out deps whose filename is already in the modpack (installed but not cached)
-                    let dep_infos: Vec<_> = dep_infos.into_iter().filter(|dep| {
-                        if existing_filenames.contains(&dep.filename) {
-                            println!("⏸ {} ya existe en el modpack (filename match), saltando.", dep.filename);
-                            false
-                        } else {
-                            true
+                            for dep_info in dep_infos {
+                                let dep_mod_info = crate::local_mods_ops::ModInfo {
+                                    key: dep_info.filename.clone(),
+                                    name: dep_info.name.clone(), // Use proper generic display name
+                                    detected_project_id: Some(dep_info.project_id.clone()),
+                                    confirmed_project_id: Some(dep_info.project_id.clone()),
+                                    version_local: Some("".to_string()),
+                                    version_remote: Some(dep_info.version_remote.clone()),
+                                    selected: true,
+                                    file_size_bytes: None,
+                                    file_mtime_secs: None,
+                                    depends: None,
+                                };
+                                
+                                let job = crate::fetch::async_download::DownloadJob {
+                                    key: dep_info.filename.clone(),
+                                    modinfo: dep_mod_info,
+                                    output_folder: main_job.output_folder.clone(),
+                                    selected_version: main_job.raw_game_version.clone(), // Sub-dependencies are resolved organically, not by exact file ID
+                                    selected_loader: main_job.selected_loader.clone(),
+                                    content_type: crate::fetch::search_provider::ContentType::Mod,
+                                    replaces_filename: None,
+                                    raw_game_version: main_job.raw_game_version.clone(),
+                                };
+                                final_jobs.push(job);
+                            }
                         }
-                    }).collect();
-
-                    // Collect display names to send back to UI
-                    let dep_names: Vec<String> = dep_infos.iter().map(|d| d.filename.clone()).collect();
-                    let _ = tx_dep_res.send((mod_key.clone(), dep_names));
-
-                    // Enqueue each dep as a normal DownloadJob so it shows in DESCARGA
-                    for dep_info in dep_infos {
-                        println!("📥 Encolando dependencia: {}", dep_info.filename);
-                        let dep_mod_info = crate::local_mods_ops::ModInfo {
-                            key: dep_info.filename.clone(),
-                            name: dep_info.filename.clone(),
-                            detected_project_id: Some(dep_info.project_id.clone()),
-                            confirmed_project_id: Some(dep_info.project_id.clone()),
-                            version_local: Some(version.clone()),
-                            version_remote: Some(dep_info.version_remote.clone()),
-                            selected: true,
-                            file_size_bytes: None,
-                            file_mtime_secs: None,
-                            depends: None,
-                        };
-                        let job = crate::fetch::async_download::DownloadJob {
-                            key: dep_info.filename.clone(),
-                            modinfo: dep_mod_info,
-                            output_folder: output_folder.clone(),
-                            selected_version: version.clone(),
-                            selected_loader: loader.clone(),
-                            content_type: crate::fetch::search_provider::ContentType::Mod,
-                        };
-                        let _ = tx_jobs_clone.send(job);
                     }
+
+                    // Send the fully resolved list to the UI
+                    let _ = tx_download_resolutions.send(final_jobs);
                 }
             });
         }
@@ -316,6 +318,26 @@ impl ModUpdaterApp {
             spawn_datapack_read_workers(dp_workers, rx_dp_read_jobs, tx_dp_read_events_send);
         }
 
+        // --- Version Fetching Worker ---
+        let (tx_fetch_versions, rx_fetch_versions) = unbounded::<(String, String, String, ContentType)>();
+        let (tx_versions_res, rx_versions_result) = unbounded::<Vec<crate::fetch::search_provider::ProjectVersion>>();
+        {
+            let tx_res = std::sync::Arc::new(tx_versions_res);
+            thread::spawn(move || {
+                // We use ModSearchProvider and DatapackSearchProvider to fetch versions based on ContentType
+                let mod_provider = ModSearchProvider;
+                let dp_provider = DatapackSearchProvider;
+
+                while let Ok((project_id, loader, version, content_type)) = rx_fetch_versions.recv() {
+                    let versions = match content_type {
+                        ContentType::Mod => mod_provider.fetch_versions(&project_id, &loader, &version),
+                        ContentType::Datapack => dp_provider.fetch_versions(&project_id, &loader, &version),
+                    };
+                    let _ = tx_res.send(versions);
+                }
+            });
+        }
+
         return Self {
             mods: ui_mods,
             mc_versions, 
@@ -362,8 +384,9 @@ impl ModUpdaterApp {
             },
             tx_search,
             rx_search,
-            tx_resolve_deps,
-            rx_dep_resolved,
+            tx_prepare_downloads,
+            rx_prepare_downloads_result,
+            pending_downloads: None,
             tx_resolve_profile_deps,
             rx_profile_deps_resolved,
             tx_fetch_dep_names,
@@ -375,6 +398,8 @@ impl ModUpdaterApp {
             tx_dp_read_jobs,
             rx_dp_read_events,
             datapacks_loaded: false,
+            tx_fetch_versions,
+            rx_versions_result,
         };
     }
 }
@@ -415,6 +440,11 @@ impl eframe::App for ModUpdaterApp {
 
         // --- Main Content ---
         CentralPanel::default().show(ctx, |ui| {
+            if self.search_state.open {
+                self.render_search_center(ui);
+                return;
+            }
+            
             match self.current_tab {
                 AppTab::Explorer => self.render_modpacks_center(ui),
                 AppTab::Profiles => self.render_profiles_center(ui),
@@ -431,7 +461,7 @@ impl eframe::App for ModUpdaterApp {
         self.render_deletion_modal(ctx);
         self.render_download_modal(ctx);
         self.render_create_profile_modal(ctx);
-        self.render_search_modal(ctx);
+        self.render_duplicate_resolution_modal(ctx);
 
         // --- Background Search / Dependency Events ---
         self.process_search_events();

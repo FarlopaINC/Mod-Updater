@@ -24,6 +24,8 @@ pub struct DownloadJob {
     pub selected_version: String,
     pub selected_loader: String,
     pub content_type: ContentType,
+    pub replaces_filename: Option<String>,
+    pub raw_game_version: String,
 }
 
 pub fn spawn_workers(n: usize, rx: Receiver<DownloadJob>, tx_events: Sender<DownloadEvent>) {
@@ -57,7 +59,14 @@ pub fn spawn_workers(n: usize, rx: Receiver<DownloadJob>, tx_events: Sender<Down
 
                 let res = fetch_from_api::download_mod_file(&info.url, &job.output_folder, &info.filename);
                 match res {
-                    Ok(_) => { let _ = tx.send(DownloadEvent::Done { key: key.clone() }); }
+                    Ok(_) => { 
+                        // If replacing, delete the old file safely after new one is successfully downloaded
+                        if let Some(old_filename) = &job.replaces_filename {
+                            let old_path = std::path::Path::new(&job.output_folder).join(old_filename);
+                            let _ = std::fs::remove_file(old_path);
+                        }
+                        let _ = tx.send(DownloadEvent::Done { key: key.clone() }); 
+                    }
                     Err(e) => { let _ = tx.send(DownloadEvent::Error { key: key.clone(), msg: format!("[ERROR]: Fallo descargando: {}", e) }); }
                 }
             }

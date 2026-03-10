@@ -41,8 +41,9 @@ impl super::app::ModUpdaterApp {
     pub(crate) fn render_modpacks_side(&mut self, ctx: &egui::Context) {
         let max_len = self.cached_modpacks.iter().map(|s| s.len()).max().unwrap_or(0);
         // Approx 8px per char + space for buttons (X, OFF, ON), margin and scrollbar
-        let dynamic_min_width = 150.0_f32.max((max_len as f32 * 8.0) + 130.0);
-        let dynamic_max_width = 400.0_f32.max(dynamic_min_width + 100.0);
+        let char_width = 10.0;
+        let dynamic_min_width = 120.0_f32.max((max_len as f32 * char_width) + 85.0);
+        let dynamic_max_width = 350.0_f32.max(dynamic_min_width + 50.0);
 
         SidePanel::right("selector_modpacks")
         .resizable(true)
@@ -69,24 +70,13 @@ impl super::app::ModUpdaterApp {
                             },
                         };
 
-                        let indicator = if is_active_disk && is_selected_ui {
-                            ">> " 
-                        } else if is_selected_ui {
-                            "> "
-                        } else {
-                            "  "
-                        };
-
-
                         ui.horizontal(|ui| {
                             // Left side: modpack name button
-                            let label = format!("{}{}", indicator, mp);
+                            let label = format!("[{}]", mp);
                             let color = if is_selected_ui { tui_theme::ACCENT } else { tui_theme::TEXT_PRIMARY };
                             let text = egui::RichText::new(&label).color(color).family(egui::FontFamily::Monospace);
-                            if ui.add(egui::Button::new(text)
-                                .fill(egui::Color32::TRANSPARENT)
-                                .stroke(egui::Stroke::NONE)
-                                .corner_radius(egui::CornerRadius::ZERO)).clicked() {
+                            
+                            if ui.add(egui::SelectableLabel::new(is_selected_ui, text)).clicked() {
                                 let target_folder = if is_selected_ui {
                                     self.selected_modpack_ui = None;
                                     PATHS.mods_folder.clone()
@@ -103,7 +93,7 @@ impl super::app::ModUpdaterApp {
                                     self.deletion_confirmation = DeletionConfirmation::Modpack(mp.clone());
                                 }
 
-                                if is_selected_ui && !is_active_disk {
+                                if !is_active_disk {
                                     if tui_button_c(ui, "OFF", tui_theme::NEON_RED).on_hover_text("Activar este modpack").clicked() {
                                         self.status_msg = match change_mods(&mp) {
                                             Ok(msg) => {

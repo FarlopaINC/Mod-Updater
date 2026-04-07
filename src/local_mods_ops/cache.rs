@@ -89,6 +89,7 @@ pub fn get_mod(filename: &str) -> Option<ModInfo> {
         file_size_bytes: cached_file.file_size_bytes,
         file_mtime_secs: cached_file.file_mtime_secs,
         depends: cached_file.depends,
+        has_local_icon: proj.has_local_icon,
     })
 }
 
@@ -108,6 +109,7 @@ pub fn upsert_mod(filename: &str, info: &ModInfo) {
             detected_project_id: info.detected_project_id.clone(),
             confirmed_project_id: info.confirmed_project_id.clone(),
             version_remote: info.version_remote.clone(),
+            has_local_icon: info.has_local_icon,
         };
 
         // Preservar confirmed_id y version_remote existentes si el nuevo info no los tiene
@@ -118,6 +120,10 @@ pub fn upsert_mod(filename: &str, info: &ModInfo) {
                 }
                 if project_to_save.version_remote.is_none() {
                     project_to_save.version_remote = existing.version_remote;
+                }
+                // Si ya había icono y ahora no lo comprobamos, lo mantenemos (o si el nuevo dice true, machaca)
+                if !project_to_save.has_local_icon {
+                    project_to_save.has_local_icon = existing.has_local_icon;
                 }
             }
         }
@@ -170,6 +176,7 @@ pub fn update_remote_info_with_deps(filename: &str, project_id: Option<String>, 
                 if let Ok(mut proj) = serde_json::from_str::<CachedProject>(access.value()) {
                     proj.confirmed_project_id = project_id;
                     proj.version_remote = version_remote;
+                    // Note: `update_remote_info` is for CF data, so it doesn't change `has_local_icon`
                     serde_json::to_string(&proj).ok()
                 } else { None }
             } else { None };

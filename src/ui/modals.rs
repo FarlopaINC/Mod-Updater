@@ -185,6 +185,7 @@ impl super::app::ModUpdaterApp {
                                                     content_type: crate::fetch::search_provider::ContentType::Mod,
                                                     replaces_filename: None,
                                                     raw_game_version: self.selected_mc_version.clone(),
+                                                    pre_resolved: None,
                                                 };
                                                 let _ = self.tx_jobs.send(job);
                                                 count += 1;
@@ -203,12 +204,14 @@ impl super::app::ModUpdaterApp {
                                                     content_type: crate::fetch::search_provider::ContentType::Mod,
                                                     replaces_filename: None,
                                                     raw_game_version: self.selected_mc_version.clone(),
+                                                    pre_resolved: None,
                                                 };
                                                 let _ = self.tx_jobs.send(job);
                                                 count += 1;
                                             }
                                         }
-                                    }
+                                    },
+                                    DownloadSource::None => {},
                                 }
                                 self.status_msg = format!("Iniciando descarga de {} mods en '{}'", count, name);
                                 self.cached_modpacks = list_modpacks();
@@ -368,6 +371,38 @@ impl super::app::ModUpdaterApp {
 
                     let mut apply_all_action = None;
 
+                    // Global actions at the top
+                    ui.horizontal(|ui| {
+                        tui_dim(ui, "Aplicar a todos:");
+                        if ui.button("Instalar").clicked() { apply_all_action = Some(DownloadAction::Install); }
+                        if ui.button("Reemplazar").clicked() { apply_all_action = Some(DownloadAction::Replace); }
+                        if ui.button("Ignorar").clicked() { apply_all_action = Some(DownloadAction::Skip); }
+                    });
+
+                    if let Some(action) = apply_all_action {
+                        for res in resolutions.iter_mut() {
+                            if matches!(res.status, ModStatus::Idle | ModStatus::Error(_)) {
+                                // Only allow Replace if there's actually an existing file
+                                if action == DownloadAction::Replace && res.existing_filename.is_none() {
+                                    res.action = DownloadAction::Install;
+                                } else {
+                                    res.action = action.clone();
+                                }
+                            }
+                        }
+                    }
+
+                    ui.add_space(8.0);
+                    tui_separator(ui);
+                    ui.add_space(5.0);
+
+                    // Sync live download status into each resolution item
+                    for res in resolutions.iter_mut() {
+                        if let Some(status) = self.active_downloads.get(&res.download_job.key) {
+                            res.status = status.clone();
+                        }
+                    }
+
                     egui::ScrollArea::vertical()
                         .max_height(350.0)
                         .show(ui, |ui| {
@@ -375,18 +410,27 @@ impl super::app::ModUpdaterApp {
                                 ui.group(|ui| {
                                     ui.horizontal(|ui| {
                                         ui.vertical(|ui| {
-                                            ui.label(egui::RichText::new(&res.download_job.key)
-                                                .family(egui::FontFamily::Monospace)
+                                            ui.label(egui::RichText::new(&res.modinfo.name)
                                                 .color(tui_theme::TEXT_PRIMARY)
                                                 .strong());
 
-                                            if let Some(old_name) = &res.existing_filename {
+                                            if let Some(_) = &res.existing_filename {
                                                 let old_v = res.existing_version.as_deref().unwrap_or("?");
                                                 let new_v = res.modinfo.version_remote.as_deref().unwrap_or("?");
-                                                tui_dim(ui, &format!("Existente: {} ({}) -> Nuevo: {}", old_name, old_v, new_v));
+                                                
+                                                if old_v == new_v && old_v != "?" {
+                                                    tui_theme::tui_status(ui, "Misma versión, no se descargará", tui_theme::NEON_YELLOW);
+                                                    if matches!(res.status, ModStatus::Idle | ModStatus::Error(_)) {
+                                                        res.action = DownloadAction::Skip;
+                                                    }
+                                                } else {
+                                                    ui.horizontal(|ui| {
+                                                        tui_theme::tui_status(ui, "DUPLICADO", tui_theme::NEON_YELLOW);
+                                                        tui_dim(ui, &format!("Current -> {}   New -> {}", old_v, new_v));
+                                                    });
+                                                }
                                             } else {
-                                                let new_v = res.modinfo.version_remote.as_deref().unwrap_or("?");
-                                                tui_dim(ui, &format!("Nuevo: v{}", new_v));
+                                                tui_theme::tui_status(ui, "NUEVO", tui_theme::NEON_GREEN);
                                             }
                                         });
 
@@ -414,40 +458,16 @@ impl super::app::ModUpdaterApp {
                         });
 
                     ui.add_space(10.0);
-                    tui_separator(ui);
-                    ui.add_space(5.0);
-
-                    // Global actions
-                    ui.horizontal(|ui| {
-                        tui_dim(ui, "Aplicar a todos:");
-                        if ui.button("Instalar").clicked() { apply_all_action = Some(DownloadAction::Install); }
-                        if ui.button("Reemplazar").clicked() { apply_all_action = Some(DownloadAction::Replace); }
-                        if ui.button("Ignorar").clicked() { apply_all_action = Some(DownloadAction::Skip); }
-                    });
-
-                    if let Some(action) = apply_all_action {
-                        for res in resolutions.iter_mut() {
-                            if matches!(res.status, ModStatus::Idle | ModStatus::Error(_)) {
-                                // Only allow Replace if there's actually an existing file
-                                if action == DownloadAction::Replace && res.existing_filename.is_none() {
-                                    res.action = DownloadAction::Install;
-                                } else {
-                                    res.action = action.clone();
-                                }
-                            }
-                        }
-                    }
-
-                    ui.add_space(10.0);
                     ui.horizontal(|ui| {
                         if tui_button_c(ui, "CERRAR", tui_theme::NEON_RED).clicked() {
                             close_requested = true;
                         }
 
-                        let pending = resolutions.iter().any(|r| matches!(r.status, ModStatus::Resolving | ModStatus::Downloading(_)));
-                        if pending {
-                            tui_dim(ui, "   Espere...");
-                        } else {
+                        let in_progress = resolutions.iter().any(|r| matches!(r.status, ModStatus::Resolving | ModStatus::Downloading(_)));
+                        let already_started = resolutions.iter().any(|r| matches!(r.status, ModStatus::Resolving | ModStatus::Downloading(_) | ModStatus::Done));
+                        if in_progress {
+                            tui_dim(ui, "   Descargando...");
+                        } else if !already_started {
                             if tui_button_c(ui, "APLICAR", tui_theme::NEON_GREEN).clicked() {
                                 start_downloads = true;
                             }
@@ -463,18 +483,26 @@ impl super::app::ModUpdaterApp {
                                 res.status = ModStatus::Done;
                             }
                             DownloadAction::Install | DownloadAction::Replace => {
-                                res.status = ModStatus::Resolving;
-                                // Need to enqueue download job.
-                                // It will be processed asynchronously by tx_jobs.
+                                // Enqueue download job.
                                 let mut job = res.download_job.clone();
                                 if res.action == DownloadAction::Replace {
                                     job.replaces_filename = res.existing_filename.clone();
                                 }
+                                self.active_downloads.insert(job.key.clone(), ModStatus::Resolving);
                                 let _ = self.tx_jobs.send(job);
                             }
                         }
                     }
                 }
+            }
+
+            // Auto-close once every item is Done or was Skipped
+            let all_finished = resolutions.iter().all(|r| {
+                matches!(r.status, ModStatus::Done) || matches!(r.action, DownloadAction::Skip)
+            });
+            let has_completed = resolutions.iter().any(|r| matches!(r.status, ModStatus::Done));
+            if all_finished && has_completed {
+                close_requested = true;
             }
 
             if !open || close_requested {

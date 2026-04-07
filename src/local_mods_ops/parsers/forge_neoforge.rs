@@ -20,7 +20,10 @@ struct ForgeModToml {
 struct ForgeModEntry {
     mod_id: String,
     version: Option<String>,
+    #[serde(rename = "displayName")]
     display_name: Option<String>,
+    #[serde(rename = "logoFile")]
+    logo_file: Option<String>,
 }
 
 // ── Parser ───────────────────────────────────────────────────
@@ -61,6 +64,20 @@ pub fn try_parse(zip: &mut ZipArchive<File>, path: &Path) -> Option<ModInfo> {
     // Limpiar versión (Forge usa ${file.jarVersion} como placeholder)
     let version = entry.version.clone().filter(|v| !v.contains("${"));
 
+    let mut has_local_icon = false;
+    let icon_paths = [
+        entry.logo_file.as_deref(),
+        Some("pack.png"),
+        Some("logo.png"),
+    ];
+
+    for path in icon_paths.into_iter().flatten() {
+        if super::extract_and_save_icon(zip, path, &entry.mod_id) {
+            has_local_icon = true;
+            break;
+        }
+    }
+
     Some(ModInfo {
         key,
         name,
@@ -72,5 +89,6 @@ pub fn try_parse(zip: &mut ZipArchive<File>, path: &Path) -> Option<ModInfo> {
         file_size_bytes: None,
         file_mtime_secs: None,
         depends,
+        has_local_icon,
     })
 }

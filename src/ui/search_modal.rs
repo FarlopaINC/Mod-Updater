@@ -246,6 +246,7 @@ impl super::app::ModUpdaterApp {
                                                                 file_size_bytes: None,
                                                                 file_mtime_secs: None,
                                                                 depends: None,
+                                                                has_local_icon: false,
                                                             };
                                                             
                                                             let output_folder_path = match &self.search_state.source {
@@ -277,6 +278,7 @@ impl super::app::ModUpdaterApp {
                                                                 content_type: self.search_state.content_type,
                                                                 replaces_filename: None,
                                                                 raw_game_version: self.search_state.version.clone(),
+                                                                pre_resolved: None,
                                                             };
                                                             
                                                             let _ = self.tx_prepare_downloads.send((
@@ -284,7 +286,6 @@ impl super::app::ModUpdaterApp {
                                                                 self.search_state.download_dependencies,
                                                                 existing_project_ids,
                                                             ));
-                                                            self.active_downloads.insert(ver.version_number.clone(), ModStatus::Resolving);
                                                         }
                                                     }
                                                 },

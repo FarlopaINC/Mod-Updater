@@ -26,6 +26,7 @@ pub struct DownloadJob {
     pub content_type: ContentType,
     pub replaces_filename: Option<String>,
     pub raw_game_version: String,
+    pub pre_resolved: Option<crate::fetch::fetch_from_api::ModDownloadInfo>,
 }
 
 pub fn spawn_workers(n: usize, rx: Receiver<DownloadJob>, tx_events: Sender<DownloadEvent>) {
@@ -38,17 +39,21 @@ pub fn spawn_workers(n: usize, rx: Receiver<DownloadJob>, tx_events: Sender<Down
 
         let _ = tx.send(DownloadEvent::Resolving { key: key.clone() });
 
-        let cf_key = crate::fetch::cf_api_key();
+        let resolved_info = if let Some(pre) = job.pre_resolved {
+            Some(pre)
+        } else {
+            let cf_key = crate::fetch::cf_api_key();
+            let resolved_id: Option<String> = mi.confirmed_project_id.clone()
+                .or_else(|| {
+                    mi.detected_project_id.as_deref()
+                        .and_then(crate::local_mods_ops::cache::get_confirmed_id)
+                })
+                .or(mi.detected_project_id.clone());
 
-        // Resolver el ID del proyecto: confirmed > cache lookup > detected
-        let resolved_id: Option<String> = mi.confirmed_project_id.clone()
-            .or_else(|| {
-                mi.detected_project_id.as_deref()
-                    .and_then(crate::local_mods_ops::cache::get_confirmed_id)
-            })
-            .or(mi.detected_project_id.clone());
+            fetch_from_api::find_mod_download(&mi.name, resolved_id.as_deref(), &job.raw_game_version, &job.selected_loader, &cf_key, &job.content_type)
+        };
 
-        match fetch_from_api::find_mod_download(&mi.name, resolved_id.as_deref(), &job.selected_version, &job.selected_loader, &cf_key, &job.content_type) {
+        match resolved_info {
             Some(info) => {
                 let confirmed_project_id = Some(info.project_id.clone());
                 let version_remote = Some(info.version_remote.clone());

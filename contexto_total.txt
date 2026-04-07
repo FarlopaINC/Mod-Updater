@@ -1,0 +1,405 @@
+﻿
+
+=== Archivo: C:\Users\Mario\Desktop\modsUpdater\mods_updater\.agent\rules\fetch_rules.md ===
+---
+trigger: glob
+---
+
+---
+description: EstÃ¡ndares de desarrollo para los algoritmos de busqueda y descarga de contenido.
+globs: 
+  - "src/fetch/**/*.rs"
+---
+
+# Reglas Estrictas en rust.
+- Hay que tener en cuenta la paralelizaciÃ³n y asyncronia del cÃ³digo para poder ofrecer la mejor experiencia al usuario sin congelaciones de la ui ni tiempos de descarga largos. 
+- Arquitectura a prueba de fallos: Se usan distintas APIS para mayor tasa de exito a la hora de buscar contenido. El orden de uso de las APIS viene dado por prioridades que cambian dinamicamente en funciÃ³n de elementos restrictivos como rate limits.
+
+
+=== Archivo: C:\Users\Mario\Desktop\modsUpdater\mods_updater\.agent\rules\implementationplans.md ===
+---
+trigger: always_on
+---
+
+---
+description: Reglas a la hora de escribir los planes de implementaciÃ³n.
+---
+
+# Idioma.
+  - Usar siempre el espaÃ±ol como idioma por defecto.
+
+# Elementos que tienen que tener.
+  - En caso de ambigÃ¼edades, dudas o aspectos no tenidos en cuenta, informar o preguntar dentro del propio plan de implementaciÃ³n.
+
+# Acciones obligatorias.
+  - Cuando se le da a revisar al plan de implementaciÃ³n es para que todos los comentarios y texto extra que se ha realizado sea procesado y se modifique el plan de implementaciÃ³n acorde con lo que se ha indicado.
+  - Prohibido proceder con el plan si no se ha le ha dado al botÃ³n de "proceder" o no se ha indicado expresamente.
+
+
+=== Archivo: C:\Users\Mario\Desktop\modsUpdater\mods_updater\.agent\rules\security_files.md ===
+---
+trigger: glob
+---
+
+---
+description: Reglas de seguridad crÃ­ticas para evitar corrupciÃ³n o pÃ©rdida de datos en el sistema del usuario.
+globs:
+  - "src/local_mods_ops/**/*.rs"
+  - "src/local_datapacks_ops/**/*.rs"
+  - "src/ui/**/*.rs"
+---
+
+# Reglas de Seguridad y ManipulaciÃ³n de Archivos
+
+Al trabajar en operaciones de disco (I/O, borrado, movimiento de archivos) o en lÃ³gicas que involucren los directorios del juego (Minecraft, saves, config), el agente debe cumplir estrictamente las siguientes normativas para evitar desastres o corrupciÃ³n:
+
+## 1. PreservaciÃ³n de Archivos del Juego
+- **Intocables**: NUNCA modificar, sobreescribir ni eliminar archivos estructurales del juego base (ej. configuraciones en `config/`, data fundamental en `saves/` ajena a la subcarpeta `datapacks/`). 
+- **LÃ­mites de OperaciÃ³n**: Las operaciones de escritura y borrado estÃ¡n contenidas Ãºnica y exclusivamente en las carpetas `mods/` y `saves/<mundo>/datapacks/`. Cualquier operaciÃ³n de I/O fuera de estos lÃ­mites requerirÃ¡ confirmaciÃ³n explÃ­cita.
+
+## 2. Borrado Seguro y Recuperable
+- **Reciclaje sobre EliminaciÃ³n Dura**: Al eliminar mods obsoletos o desinstalar dependencias, si es posible en el sistema del usuario, preferir mover temporalmente a una papelera u ocultarlos (renombrar agregando una extensiÃ³n `.disabled`) en lugar de usar `fs::remove_file` directamente, a menos que el flujo de limpieza del perfil dicte explÃ­citamente un borrado (como vaciar la cachÃ©).
+- **VerificaciÃ³n Rigurosa**: Antes de borrar, verificar que la ruta absoluta apunta a un archivo `.jar` o `.zip` que conocemos. NUNCA usar borrado recursivo (`fs::remove_dir_all`) sobre un directorio que no haya sido creado por el propio aplicativo temporalmente.
+
+## 3. Manejo de Errores CrÃ­ticos de I/O
+- Nunca aplicar un `.unwrap()` o `.expect()` ignorante a una operaciÃ³n de apertura, lectura, copia o borrado de archivos. Todos los errores deben ser propagados (`?` o `match`) hacia la UI para presentar un fallo no fatal. 
+- Al interactuar con `.jar` o `.zip` masivos bloqueados temporalmente por el OS o el antivirus, el cÃ³digo debe fallar graciosamente en vez de crashear el gestor.
+
+
+=== Archivo: C:\Users\Mario\Desktop\modsUpdater\mods_updater\.agent\rules\terminal_execution.md ===
+---
+trigger: always_on
+---
+
+---
+description: Reglas estrictas para la ejecuciÃ³n de comandos en la terminal.
+---
+# Contexto de EjecuciÃ³n (Conda)
+- **Entorno Activo:** El proyecto utiliza un entorno conda especÃ­fico.
+- **Regla Estricta:** NUNCA ejecutes comandos de cargo fuera de este entorno
+- **Sintaxis Obligatoria:** Si necesitas ejecutar una funcionalidad de cargo en la terminal, debes prefijarlo SIEMPRE con `conda run -n rust_env --no-capture-output`. 
+   - *Prohibido:* 
+        - no instalar nada sin permiso y que no estÃ© ya instalado en dicho entorno.
+        - No hacer cargo build --release
+
+
+=== Archivo: C:\Users\Mario\Desktop\modsUpdater\mods_updater\.agent\skills\fetch\cache_skill.md ===
+---
+name: API Caching & Rate Limits
+description: Manejo de cachÃ© local, persistencia temporal y salvaguardas de peticiones.
+---
+# API Caching & Rate Limits
+
+Este skill dicta cÃ³mo la aplicaciÃ³n modera y optimiza las peticiones HTTP salientes para evitar baneos o bloqueos por las plataformas.
+
+## 1. Defensa contra Rate Limits
+- Modrinth y CurseForge penalizan envÃ­os masivos. Se debe prever siempre la posibilidad de un cÃ³digo HTTP `429 Too Many Requests`.
+- Si se alcanza un rate-limit o fallo temporal, se debe capturar limpiamente sin crashear y, de ser posible, procesar un retardo (backoff).
+
+## 2. CachÃ© y ReutilizaciÃ³n
+- Para bÃºsquedas repetitivas (ejemplo: buscar las dependencias cruzadas de un mod que ya buscaste hace unos segundos), delegar o verificar en memoria/disco local (`src/local_mods_ops/cache.rs` o el sistema local designado).
+- No ejecutar una llamada de red si los metadatos de esa ID y versiÃ³n ya constan en la cachÃ© del entorno.
+
+## 3. Optimizaciones en Modpacks Completos
+En procesos intensivos (descargas de modpacks), agrupar verificaciones usando los endpoints masivos (mÃºltiples IDs de una vez) que ofrecen las APIs, en lugar de solicitar secuencialmente archivo por archivo.
+
+
+=== Archivo: C:\Users\Mario\Desktop\modsUpdater\mods_updater\.agent\skills\fetch\dependency_resolution.md ===
+---
+name: "Manejo de Dependencias y Modals"
+description: "Contexto tÃ©cnico y arquitectÃ³nico sobre cÃ³mo se descargan o descartan los mods individuales y sus dependencias."
+---
+
+# Flujo de Descargas y Dependencias (Duplicate Resolution)
+
+Este archivo describe el flujo usado en `modsUpdater` para procesar la intenciÃ³n de descarga de un mod (tanto masiva como individual), buscar sus dependencias y finalmente presentarle al usuario la decisiÃ³n de quÃ© hacer con los ficheros duplicados o existentes.
+
+## 1. Trigger de la Descarga
+
+La intenciÃ³n original de descarga **NUNCA** empuja directamente un fichero JAR a la carpeta. Primero debe pasar por el sistema de dependencias. 
+- En `search_modal.rs` (BÃºsqueda Individual) o en la BÃºsqueda de Perfiles, cuando el usuario hace click en descargar (botÃ³n `DL` u opciones equivalentes), se genera un struct `DownloadJob`.
+- Este `DownloadJob`, junto al booleano indicando si queremos dependencias, y un `HashSet` con los identificadores que *ya tenemos localmente*, se envÃ­a por el canal MPSC `tx_prepare_downloads`.
+
+## 2. ResoluciÃ³n en Segundo Plano (`app.rs`)
+
+En `app.rs`, existe un *thread* dedicado a escuchar `rx_prepare_downloads`. 
+Si el usuario pidiÃ³ dependencias:
+- Se extrae el `project_id` del `DownloadJob`.
+- Se consulta a la API de Modrinth o CurseForge usando `resolve_all_dependencies(...)` en `fetch_from_api.rs`.
+- La API devuelve las dependencias necesarias. Se excluyen aquellas cuyos IDs ya estaban presentes en el `HashSet` (porque ya las poseemos).
+- Se genera un vector `Vec<DownloadJob>` con el mod principal + todas sus nuevas dependencias necesarias, empaquetadas con su estado previo (pre_resolved) si es posible.
+- Este vector se envÃ­a al hilo principal mediante `tx_download_resolutions`.
+
+## 3. RecepciÃ³n y ClasificaciÃ³n (`event_handlers.rs`)
+
+En la funciÃ³n `process_download_events`, el receptor `rx_prepare_downloads_result` detecta la llegada del vector de trabajos:
+- C cruza la lista de trabajos con el inventario actual de mods cargado en RAM (`self.mods`).
+- Si algÃºn trabajo coincide en *Project ID* con uno local, se anota como **DUPLICADO** asignÃ¡ndole por defecto la acciÃ³n `DownloadAction::Skip`.
+- Estos trabajos se envuelven en el struct `DuplicateResolution` y se guardan en la variable *Option* `self.pending_downloads`.
+
+## 4. Modal de ConfirmaciÃ³n de Descargas (`modals.rs`)
+
+Al tener `self.pending_downloads` relleno, el mÃ©todo `render_duplicate_resolution_modal` comienza a dibujarse como una ventana emergente en pantalla:
+- Se lista de forma simplificada cada mod en trÃ¡mite.
+- Se indica visualmente si es **NUEVO** o si es un **DUPLICADO** detallando su versiÃ³n (*Current -> New*).
+- Si la versiÃ³n existente y la versiÃ³n nueva son **idÃ©nticas**, se auto-marca como "Misma versiÃ³n, no se descargarÃ¡" forzando la acciÃ³n a `Skip`.
+- El usuario puede usar botones de acciÃ³n global (Instalar / Reemplazar / Ignorar) en la cabecera.
+- Tras revisar las opciones, el click final en **APLICAR** procesa el vector:
+    - Para los marcados como *Instalar* o *Reemplazar*, inserta su ID respectivo en el mapa `self.active_downloads` (con estado `ModStatus::Resolving`) para que la barra de progreso aparezca instantÃ¡neamente.
+    - Se manda el trabajo final de descarga al `tx_jobs` para que los verdaderos procesos asÃ­ncronos en `async_download.rs` comiencen la descarga fÃ­sica de bytes al disco duro.
+    - La ventana modal se cierra (`self.pending_downloads = None`).
+
+
+=== Archivo: C:\Users\Mario\Desktop\modsUpdater\mods_updater\.agent\skills\fetch\fetch_context.md ===
+---
+name: Fetch Generic Context
+description: Arquitectura base de peticiones HTTP, APIs de mods y concurrencia general.
+---
+# Fetch Context
+
+Reglas universales para cualquier peticiÃ³n de red en el mÃ³dulo `fetch` de `modsUpdater`.
+
+## 1. APIs y AutenticaciÃ³n
+- **CurseForge**: Usa endpoint oficial y requiere siempre proveer el header HTTP `x-api-key`. Los IDs de proyecto son numÃ©ricos.
+- **Modrinth**: Usa arquitectura REST en `https://api.modrinth.com/v2/`. Es pÃºblica para bÃºsquedas. Sus IDs (`project_id`) son strings alfanumÃ©ricos.
+
+## 2. Abstracciones
+El fetching en el proyecto se apoya en interfaces comunes. Funciones de bajo nivel residen en `fetch_from_api.rs`, mientras que los contratos genÃ©ricos de bÃºsqueda deben respetar los traits de `src/fetch/search_provider.rs` para permitir cambiar de proveedor (Curseforge <-> Modrinth) de manera limpia.
+
+## 3. Concurrencia Base y Errores
+- Toda operaciÃ³n de red debe ser asÃ­ncrona. 
+- Se prohÃ­be estrictamente hacer llamadas a red que demoren el hilo de la UI. 
+- Deben contemplarse errores estÃ¡ndar usando `Result` para que las capas superiores notifiquen en vez de detener la aplicaciÃ³n impulsivamente.
+
+
+=== Archivo: C:\Users\Mario\Desktop\modsUpdater\mods_updater\.agent\skills\fetch\single_search.md ===
+---
+name: Single Mod Search
+description: Reglas y lÃ³gica de bÃºsquedas individuales e interactivas (Mods/Datapacks).
+---
+# Single Mod/Datapack Search
+
+Contexto especÃ­fico para bÃºsquedas interactivas disparadas por el usuario, cuyo objetivo es localizar y aÃ±adir metadatos a los perfiles, sin descargar modpacks en masa.
+
+## 1. InteracciÃ³n con TUI
+- **Archivos Core**: `single_mod_search.rs` (bÃºsqueda estÃ¡ndar de mods) y `single_datapack_search.rs` (orientado a la lÃ³gica de mundos/datapacks de Minecraft).
+- **AsincronÃ­a hacia la UI**: Este mÃ³dulo no debe bloquear la UI del modal de bÃºsqueda. Utiliza canales `mpsc` (sender/receiver) para despachar los resultados a medida que llegan.
+
+## 2. Mapeo de Datos Estricto
+- Los resultados JSON obtenidos **deben** mapearse explÃ­citamente a las estructuras manejadas en `src/local_mods_ops/models.rs` (ej. `ModInfo`).
+- Extraer siempre como mÃ­nimo: Nombre, ID remota (slug/project_id), resumen e identificar las *dependencias requeridas* si el JSON las provee.
+
+## 3. LÃ­mite de Responsabilidad
+Este flujo **no** gestiona descargas concurrentes de archivos `.jar` en lotes, se especializa en la resoluciÃ³n metadatos individuales para exposiciÃ³n visual del usuario.
+
+
+=== Archivo: C:\Users\Mario\Desktop\modsUpdater\mods_updater\.agent\skills\local_datapacks_ops\async_reader.md ===
+---
+name: Datapacks Async Reader
+description: Procesamiento asÃ­ncrono y en segundo plano de la lectura de datapacks.
+---
+# Datapacks Async Reader
+
+Reglas sobre el procesamiento paralelo al parsear datapacks en el mÃ³dulo `async_reader.rs`.
+
+## 1. Thread Pool y Canales
+- **Arquitectura**: Para evitar que la apertura de mÃºltiples archivos zip bloquee el hilo de la UI, se emplea un pool de workers nativos que procesa tareas `DatapackReadJob`.
+- **ComunicaciÃ³n**: Se utiliza la librerÃ­a `crossbeam_channel` (con un _Sender_ de la UI) para emitir eventos `DatapackReadEvent` (tanto `Done` como `Error`).
+- Al diseÃ±ar UI para datapacks, siempre suscribirse a estos canales en lugar de invocar `read_single_datapack` directamente de forma sÃ­ncrona en masa.
+
+
+=== Archivo: C:\Users\Mario\Desktop\modsUpdater\mods_updater\.agent\skills\local_datapacks_ops\models.md ===
+---
+name: Datapacks Models
+description: DefiniciÃ³n estricta de DatapackInfo y estructuras base.
+---
+# Datapacks Models
+
+Reglas sobre las estructuras de dominio manejadas para los datapacks locales (`models.rs`).
+
+## 1. El Tipo DatapackInfo
+- **`DatapackInfo`**: Representa a un datapack leÃ­do en memoria de forma completa o parcial. Almacena metadatos como el `key` que siempre es el filename del `.zip`.
+- **Ids Deducidos vs Confirmados**: Existen dos campos crÃ­ticos. `detected_project_id` (la suposiciÃ³n inicial del escÃ¡ner mediante namespaces del zip) y `confirmed_project_id` (cuando la aplicaciÃ³n ha confirmado exitosamente esta ID con Modrinth o CurseForge).
+- **Consistencia Visual**: Cualquier dato sobre el formato o la versiÃ³n de Minecraft extraÃ­da de `pack.mcmeta` (`pack_format`, `mc_version`) debe mapearse apropiadamente hacia esta estructura para su serializaciÃ³n o dibujado.
+
+
+=== Archivo: C:\Users\Mario\Desktop\modsUpdater\mods_updater\.agent\skills\local_datapacks_ops\scanner.md ===
+---
+name: Datapack Scanner
+description: Escaneo de mundos y lectura inteligente del contenido de datapacks.
+---
+# Datapack Scanner
+
+Contexto sobre cÃ³mo el sistema detecta mundos instalados y analiza sus datapacks (`scanner.rs`).
+
+## 1. DetecciÃ³n de Mundos
+- El escÃ¡ner busca dentro de la carpeta local de `saves/`. Cada subcarpeta se asume como un mundo.
+- Dentro de cada mundo, los datapacks se localizan en la subcarpeta `datapacks/`. SÃ³lo se procesan archivos `.zip`.
+
+## 2. Lectura y HeurÃ­sticas (pack.mcmeta)
+- **`pack.mcmeta`**: Es el archivo principal. De Ã©l se extrae el `pack_format`, que inmediatamente se traduce a una versiÃ³n explÃ­cita de Minecraft mediante `pack_format_to_mc()`.
+- **Namespaces (`data/`)**: Dado que muchos datapacks no tienen un "ID" estandarizado, el escÃ¡ner explora la carpeta interna `data/` del `.zip` para encontrar namespaces custom (excluyendo "minecraft"). Estos namespaces se usan como heurÃ­stica para intentar deducir el *slug* (project_id) en caso de que coincidan con el nombre del archivo.
+- **Tolerancia**: Si un datapack estÃ¡ mal formado, el cliente no crashea, sino que carga metadatos mÃ­nimos (tamaÃ±o de archivo e intentando inferir el nombre desde el filename).
+
+
+=== Archivo: C:\Users\Mario\Desktop\modsUpdater\mods_updater\.agent\skills\local_mods_ops\fs_ops.md ===
+---
+name: File System & Async Reader
+description: Operaciones sobre archivos locales (mover, borrar, copiar) y extracciÃ³n I/O asÃ­ncrona de .jar.
+---
+# File System & Async Reader
+
+Reglas sobre la manipulaciÃ³n de archivos y lectura dentro del mÃ³dulo `local_mods_ops`.
+
+## 1. Operaciones de Archivos (`fs_ops.rs`)
+- **Responsabilidad Estricta**: Este submÃ³dulo es la Ãºnica ubicaciÃ³n donde deben existir llamadas mutables al sistema de archivos local de los mods instalados (como borrarlos, moverlos entre perfiles o carpetas de bypass).
+- **PrevenciÃ³n de Errores**: Siempre verificar la existencia de rutas antes de operar y usar paths absolutos resueltos a travÃ©s de `paths_vars.rs`. No crashear la aplicaciÃ³n (usar `Result`) si un archivo estÃ¡ en uso por Windows.
+
+## 2. Lectura AsÃ­ncrona de Jars (`async_reader.rs`)
+- **DescompresiÃ³n No Bloqueante**: Extraer archivos internos de un `.jar` (que es estructuralmente un `.zip`) debe hacerse mediante utilidades asÃ­ncronas para evitar congelar la TUI principal si el Mod pesa muchos megabytes.
+- **Rendimiento**: Se usa de forma intensiva al analizar dependencias o iconos. Cerrar apropiadamente los handles (file descriptors) al finalizar.
+
+
+=== Archivo: C:\Users\Mario\Desktop\modsUpdater\mods_updater\.agent\skills\local_mods_ops\models_cache.md ===
+---
+name: Domain Models & Cache
+description: Tipado estricto (ModInfo, Profile) y reglas sobre la cachÃ© local en disco.
+---
+# Domain Models & Cache
+
+Garantiza la solidez de los datos que circulan a lo largo de toda la aplicaciÃ³n, y las polÃ­ticas de retenciÃ³n temporal.
+
+## 1. El Tipado (Domain Models)
+- **El CorazÃ³n Estructural (`models.rs`)**: Absolutamente toda la aplicaciÃ³n interactÃºa con este archivo. Estructuras como `ModInfo` o `Profile` se encuentran aquÃ­. 
+- **Inmutabilidad Relativa**: Un modelo no debe inyectar lÃ³gica de UI o de red. Los modelos se serializan limpiamente u operan con traits de deduplicaciÃ³n. Al modificar un struct aquÃ­, ser previsor con las posibles fugas hacia otros mÃ³dulos.
+
+## 2. CachÃ© Interna (`cache.rs`)
+- **PropÃ³sito**: `cache.rs` almacena en disco o memoria aquellos datos computacionalmente pesados que ya hemos resuelto. Por ejemplo: las firmas hash de los `.jar` locales o respuestas raras de red.
+- **InvalidaciÃ³n**: La lÃ³gica de cachÃ© debe expirar si ocurren cambios notables, como la actualizaciÃ³n manual de un archivo local. El agente debe usar preferiblemente cachÃ©s antes de invocar operaciones O(n) caras o llamadas I/O intensivas.
+
+
+=== Archivo: C:\Users\Mario\Desktop\modsUpdater\mods_updater\.agent\skills\local_mods_ops\parsers.md ===
+---
+name: Mod Metadata Parsers
+description: LÃ³gica para la extracciÃ³n de metainformaciÃ³n de mods (Fabric, Quilt, Forge, NeoForge).
+---
+# Mod Metadata Parsers
+
+Este skill agrupa el contexto de `src/local_mods_ops/parsers/` encargado de inferir informaciÃ³n desde el interior de los `.jar` de los mods.
+
+## 1. IdentificaciÃ³n de Loaders
+- **Fabric/Quilt**: El parser (`fabric_quilt.rs`) debe buscar e interpretar primariamente el archivo `fabric.mod.json` o equivalente. Se deben extraer: Mod ID, VersiÃ³n, Nombre amigable y lista de dependencias si las hay.
+- **Forge/NeoForge**: El parser (`forge_neoforge.rs`) apunta estructuralmente al `META-INF/mods.toml`. Es un formato distinto (TOML) y requiere deserializadores concretos para parsear campos similares.
+
+## 2. AbstracciÃ³n Unificada
+- **Punto de Entrada**: Todas las pasadas de parseo se canalizan a travÃ©s de `parsers/mod.rs` (o el equivalente pÃºblico designado), que intenta adivinar el Mod Loader iterando ambos mÃ©todos hasta encontrar Ã©xito.
+- **Tolerancia a Fallos**: Muchos mods antiguos o mal paquetizados estÃ¡n rotos. Un fallo de parseo de metadatos nunca detiene la aplicaciÃ³n, simplemente el mod se marca genÃ©ricamente con los datos que se puedan obtener del nombre del archivo.
+
+
+=== Archivo: C:\Users\Mario\Desktop\modsUpdater\mods_updater\.agent\skills\local_mods_ops\scanner.md ===
+---
+name: Local Scanner
+description: Estrategias de indexaciÃ³n y reconocimiento masivo de la carpeta mods local.
+---
+# Local Scanner
+
+Contexto del indexador local (`scanner.rs`). Responsable de reconocer quÃ© tenemos realmente instalado.
+
+## 1. IndexaciÃ³n Agresiva y Continua
+- **Flujo**: El escÃ¡ner recorre el directorio activo del perfil (tÃ­picamente `.minecraft/mods` u otras subcarpetas por versiÃ³n) para encontrar todos los archivos `.jar`.
+- **DelegaciÃ³n a Parsers**: Al detectar un nuevo mod, el escÃ¡ner se apoya inmediatamente en `parsers` para obtener la metadata.
+
+## 2. MinimizaciÃ³n de Consumo (I/O)
+- **EvasiÃ³n de Trabajo Redundante**: El escÃ¡ner se apoya en memorias o la hora de modificaciÃ³n de los archivos, para no re-escanear y re-parsear archivos grandes de `.jar` que no han sufrido modificaciones desde el Ãºltimo arranque.
+- **Hilos**: Esta es una de las operaciones mÃ¡s pesadas de arranque (Cientos de `.jar`). Usa iteraciones asÃ­ncronas o workers (`std::thread` o asincronÃ­a) y comunica el progreso ("Escaneando X/Y") hacia la TUI sin bloquearla.
+
+
+=== Archivo: C:\Users\Mario\Desktop\modsUpdater\mods_updater\.agent\skills\ui\architecture.md ===
+---
+name: TUI Architecture & State
+description: Estado global de la aplicaciÃ³n, enrutamiento y ciclo de vida de Ratatui.
+---
+# TUI Architecture & State
+
+Reglas sobre el esqueleto principal de la aplicaciÃ³n CLI interactiva.
+
+## 1. El Estado Central (`app.rs`)
+- **Responsabilidad Ãšnica**: El `ModUpdaterApp` contiene todo el estado de la UI (la pestaÃ±a actual seleccionada, listas de mods cargados, listas de perfiles, si hay un modal abierto, canales de comunicaciÃ³n asÃ­ncrona pendientes). 
+- **Enrutado (Routing)**: Define los flujos para decidir si un componente principal dibuja en pantalla o si debe ceder el control a un PopUp/Modal por encima.
+- **Tipos de Estado**: Las estructuras de datos puramente visuales o de apoyo a la reactividad de `app.rs` residen en `types.rs`.
+
+## 2. Inmutabilidad en Renderizado
+- La UI en Ratatui se dibuja fotograma a fotograma en modo retenido/inmediato segÃºn el bucle principal. Modificar el estado en `app.rs` dispara el repintado en el siguiente ciclo interactivo. Nunca se realizan pausas pesadas ni sleeps dentro de la funciÃ³n `draw`.
+
+
+=== Archivo: C:\Users\Mario\Desktop\modsUpdater\mods_updater\.agent\skills\ui\events.md ===
+---
+name: Event Routing & Input
+description: RecepciÃ³n global y enrutamiento de teclado y eventos crossterm.
+---
+# Event Routing & Input
+
+Contexto sobre `src/ui/event_handlers.rs`.
+
+## 1. Arquitectura de Despacho (Dispatcher)
+- Ratatui / Crossterm inyecta eventos (ej: `KeyCode::Char('f')`). `event_handlers.rs` es el cerebro que decide a **quiÃ©n** pertenecen esos eventos.
+- **Top-Down Blocking**: Los modales abiertos tienen prioridad total. Si `app.show_search_modal` es verdadero, el teclado **no** enviarÃ¡ el evento de flecha arriba/abajo al listado pasivo que estÃ¡ detrÃ¡s, sino que se enrutarÃ¡ a la lÃ³gica de navegaciÃ³n interna del buscador. 
+
+## 2. Modificadores de Vistas
+Si no hay pop-ups o modales bloqueando, entonces se llama a la funciÃ³n de enrutado dependiendo de la pestaÃ±a activa de `app.rs` (`app.active_tab`). 
+Se incentiva no mezclar lÃ³gica compleja en este archivo, sino invocar los manejadores (ej: `app.on_up()`) mutando la aplicaciÃ³n para conservar limpio el despacho de hardware.
+
+
+=== Archivo: C:\Users\Mario\Desktop\modsUpdater\mods_updater\.agent\skills\ui\modals.md ===
+---
+name: Popups & Modals
+description: Reglas de renderizado para componentes superpuestos e interactivos.
+---
+# Popups & Modals
+
+CÃ³mo manejar las ventanas secundarias crÃ­ticas en la UI de Ratatui.
+
+## 1. Modales EstÃ¡ndar (`modals.rs`)
+- Contiene componentes genÃ©ricos altamente reutiizables como DiÃ¡logos de ConfirmaciÃ³n (SÃ­/No) o Alertas en el centro de la pantalla (Clear).
+- El estado general (activo/inactivo) reside globalmente en `app.rs` (`app.show_confirm`), pero la lÃ³gica estricta de cÃ³mo dibujar los bordes (`Block`) y alinear el texto de la advertencia se encuentra aquÃ­.
+
+## 2. Modal de BÃºsqueda (`search_modal.rs`)
+- Modal enormemente complejo que se encapsulÃ³ en su propio fichero. 
+- **Comportamiento Reactivo**: Intercepta todo el teclado temporalmente. Incluye inputs de texto personalizados, llamadas HTTP asÃ­ncronas no bloqueantes al backend (`src/fetch`) e incorpora sus propios spiners o barras de carga internas mientras se estÃ¡ en la espera de una "BÃºsqueda individual".
+
+
+=== Archivo: C:\Users\Mario\Desktop\modsUpdater\mods_updater\.agent\skills\ui\styling.md ===
+---
+name: TUI Theme & Layout Utils
+description: ConfiguraciÃ³n unificada de estilos, colores y rectÃ¡ngulos de Ratatui.
+---
+# TUI Theme & Layout Utils
+
+Asegura consistencia grÃ¡fica a travÃ©s de todos los mÃ³dulos interconectados.
+
+## 1. Tema de la AplicaciÃ³n (`tui_theme.rs`)
+- Al centralizar los colores (`Color::DarkGray`, `Color::LightGreen`) y estilos tipogrÃ¡ficos (`Modifier::BOLD`), logramos que cualquier cambio se haga masivo.
+- Las funciones constructoras devuelven componentes nativos de Ratatui preconfigurados: `build_default_block()`, `build_highlight_style()`. Siempre se tiene que importar la paleta de aquÃ­ en vez de codificar `Style::default().fg(Color::White)` libremente a lo largo de otros archivos `.rs`.
+
+## 2. Herramientas de Dibujado (`utils.rs`)
+- Ratatui depende fuertemente de `Layout` y porcentajes para definir sub-zonas reactivas al terminal.
+- En `utils.rs`, residen algoritmos universales de centro (`centered_rect`), que permiten calcular el `Rect` perfecto dinÃ¡mico (ej: 60% w, 40% h) para asegurar que un modal mantenga sus proporciones en cualquier resoluciÃ³n por mÃ¡s pequeÃ±a que sea la ventana de comandos.
+
+
+=== Archivo: C:\Users\Mario\Desktop\modsUpdater\mods_updater\.agent\skills\ui\views.md ===
+---
+name: Main Views (Tabs)
+description: LÃ³gica y renderizado de las 3 pestaÃ±as principales de la UI.
+---
+# Main Views (Tabs)
+
+El proyecto consta de 3 pestaÃ±as principales que componen el flujo central del usuario, separadas estrictamente en archivos dedicados:
+
+## 1. Profiles View (`profiles.rs`)
+Responsable de gestionar y listar la carpeta local de mods de un perfil clÃ¡sico (Forge/Fabric). Se integra nativamente con las salidas de `src/local_mods_ops`. Funciona en base a listas seleccionables de Ratatui (`ListState`).
+
+## 2. Datapacks View (`datapacks.rs`)
+Equivalente a perfiles pero enfocado a los saves/mundos locales detectados por `scanner.rs` en `local_datapacks_ops`. Contempla comportamientos adicionales como expandir mundos para revelar los `.zip` anidados de datapacks. 
+
+## 3. Modpacks View (`modpacks.rs`)
+La pantalla dedicada a la descarga e instalaciÃ³n masiva de instancias. Difiere de las dos anteriores en que interactÃºa fuertemente con colas de red y barras de progreso en vivo hacia el usuario en lugar de simplemente listar archivos locales existentes.

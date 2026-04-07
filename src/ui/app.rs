@@ -105,6 +105,9 @@ pub struct ModUpdaterApp {
     pub(crate) tx_fetch_versions: Sender<(String, String, String, ContentType)>,
     // Returns Vec of versions
     pub(crate) rx_versions_result: Receiver<Vec<crate::fetch::search_provider::ProjectVersion>>,
+    
+    // --- Cached Images ---
+    pub(crate) loaded_icons: HashMap<String, egui::TextureHandle>,
 }
 
 impl ModUpdaterApp {
@@ -246,6 +249,7 @@ impl ModUpdaterApp {
                                     file_size_bytes: None,
                                     file_mtime_secs: None,
                                     depends: None,
+                                    has_local_icon: false,
                                 };
                                 
                                 let job = crate::fetch::async_download::DownloadJob {
@@ -257,6 +261,7 @@ impl ModUpdaterApp {
                                     content_type: crate::fetch::search_provider::ContentType::Mod,
                                     replaces_filename: None,
                                     raw_game_version: main_job.raw_game_version.clone(),
+                                    pre_resolved: Some(dep_info),
                                 };
                                 final_jobs.push(job);
                             }
@@ -357,7 +362,7 @@ impl ModUpdaterApp {
             selected_profile_name: None,
             profile_mods_pending_deletion: HashSet::new(),
 
-            selected_modpack_ui: active_modpack,
+            selected_modpack_ui: None,
 
             cached_modpacks: crate::local_mods_ops::list_modpacks(),
 
@@ -372,15 +377,15 @@ impl ModUpdaterApp {
             selected_loader: "Fabric".to_string(),
 
             download_confirmation_name: None,
-            download_source: DownloadSource::Explorer,
+            download_source: DownloadSource::None,
             create_profile_modal_name: None,
-
+            loaded_icons: HashMap::new(),
             active_downloads: HashMap::new(),
             
             search_state: SearchState {
-                 loader: "Fabric".to_string(), // Initial default
-                 version: selected_mc_version.clone(),
-                 ..Default::default()
+                loader: "Fabric".to_string(), // Initial default
+                version: selected_mc_version.clone(),
+                ..Default::default()
             },
             tx_search,
             rx_search,
@@ -397,9 +402,9 @@ impl ModUpdaterApp {
             world_datapacks: IndexMap::new(),
             tx_dp_read_jobs,
             rx_dp_read_events,
-            datapacks_loaded: false,
             tx_fetch_versions,
             rx_versions_result,
+            datapacks_loaded: false,
         };
     }
 }

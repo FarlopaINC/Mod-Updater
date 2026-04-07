@@ -16,16 +16,23 @@ pub struct Paths {
     pub versions_folder: PathBuf,
     pub modpacks_folder: PathBuf,
     pub saves_folder: PathBuf,
+    pub icons_folder: PathBuf,
 }
 
 impl Paths {
     pub fn new(base_game_path: PathBuf) -> Self {
+        let mut icons = dirs::cache_dir().unwrap_or_else(|| base_game_path.clone());
+        icons.push("mods_updater");
+        icons.push("icons");
+        let _ = std::fs::create_dir_all(&icons);
+
         Self {
             mods_folder: base_game_path.join("mods"),
             versions_folder: base_game_path.join("versions"),
             modpacks_folder: base_game_path.join("modpacks"),
             saves_folder: base_game_path.join("saves"),
             base_game_folder: base_game_path,
+            icons_folder: icons,
         }
     }
 }

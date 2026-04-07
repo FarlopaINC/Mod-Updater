@@ -16,6 +16,8 @@ pub struct ModInfo {
     pub file_mtime_secs: Option<u64>,
     #[serde(default)]
     pub depends: Option<std::collections::HashMap<String, String>>,
+    #[serde(default)]
+    pub has_local_icon: bool,
 }
 
 impl ModInfo {
@@ -29,6 +31,7 @@ impl ModInfo {
             confirmed_project_id: project_id,
             version_local: Some("Universal".to_string()),
             selected: true,
+            has_local_icon: false,
             ..Default::default()
         }
     }
@@ -44,6 +47,7 @@ impl ModInfo {
             confirmed_project_id: Some(project_id),
             version_local: Some("Universal".to_string()),
             selected: true,
+            has_local_icon: false,
             ..Default::default()
         }
     }
@@ -71,6 +75,8 @@ pub struct CachedProject {
     pub detected_project_id: Option<String>,
     pub confirmed_project_id: Option<String>,
     pub version_remote: Option<String>,
+    #[serde(default)]
+    pub has_local_icon: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,0 +1,35 @@
+# Configuración principal del Agente para modsUpdater
+name: rust-modsupdater-agent
+version: 1.0.0
+description: Asistente Senior especializado en Rust y Ratatui.
+
+# 1. EL NÚCLEO: Instrucciones base del sistema (System Prompt)
+# ... (tu configuración actual)
+
+system_prompt: |
+  Eres un desarrollador experto en Rust. Estás trabajando en 'modsUpdater'.
+  REGLA DE ORO: Antes de proponer o modificar código, ESTÁS OBLIGADO a leer el archivo '.agent/INDEX.md'.
+  RAG MANUAL: Prohibido usar `read_file` para archivos .md enteros. Usa `run_command` con `grep -C 15 'concepto' archivo.md` para extraer solo el contexto necesario.
+  OUTPUT CONSTRAINING: Devuelve SOLO el código. Cero introducciones, cero conclusiones. Si el archivo es grande, devuelve solo la función modificada.
+  COMPRESIÓN: Si el chat se alarga más de 5 interacciones para resolver un bug, pídeme explícitamente que cierre este chat y abra uno nuevo.
+
+context:
+  always_include:
+    - ".agent/INDEX.md"
+    - ".agent/rules/security_files.md" # [NUEVO] Pon aquí las reglas más críticas para que entren en el Prompt Caching desde el inicio.
+
+# ... (resto de tu archivo)
+  
+  # Carpetas prohibidas (Evita que el agente lea basura o binarios pesados)
+  ignore:
+    - "target/"
+    - ".git/"
+    - "**/*.jar"
+    - "**/*.zip"
+
+# 3. PERMISOS: Qué puede hacer el agente en tu ordenador
+tools:
+  allowed:
+    - grep         
+    - list_directory    
+    - run_command        

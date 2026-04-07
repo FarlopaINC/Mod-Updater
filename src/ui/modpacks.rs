@@ -9,7 +9,7 @@ use crate::local_mods_ops::{
 use crate::paths_vars::PATHS;
 use super::utils::{format_dep_name, format_version_range};
 use super::tui_theme::{self, tui_button, tui_button_c, tui_checkbox, tui_heading, tui_dim};
-use super::types::{DeletionConfirmation, UiModInfo, ModStatus, SearchSource};
+use super::types::{DeletionConfirmation, UiModInfo, ModStatus, SearchSource, DownloadSource};
 
 impl super::app::ModUpdaterApp {
     /// Carga mods de una carpeta: intenta caché primero, si no, crea placeholder y envía ReadJob.
@@ -23,16 +23,39 @@ impl super::app::ModUpdaterApp {
                 let path = entry.path();
                 if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("jar") {
                     let key = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-                    let placeholder = ModInfo {
-                        key: key.clone(), name: key.clone(),
-                        detected_project_id: None, confirmed_project_id: None,
-                        version_local: None, version_remote: None, selected: true,
-                        file_size_bytes: None, file_mtime_secs: None, depends: None,
-                    };
-                    self.mods.insert(key, UiModInfo {
-                        inner: placeholder, status: ModStatus::Resolving, progress: 0.0,
-                    });
-                    let _ = self.tx_read_jobs.send(ReadJob { file_path: path });
+                    let mut needs_scan = true;
+                    
+                    if let Some(cached_info) = crate::local_mods_ops::cache::get_mod(&key) {
+                        if let Ok(metadata) = std::fs::metadata(&path) {
+                            let size = metadata.len();
+                            let mtime = metadata.modified().ok()
+                                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                                .map(|d| d.as_secs());
+                                
+                            if cached_info.file_size_bytes == Some(size) && cached_info.file_mtime_secs == mtime {
+                                self.mods.insert(key.clone(), UiModInfo {
+                                    inner: cached_info,
+                                    status: ModStatus::Idle,
+                                    progress: 1.0,
+                                });
+                                needs_scan = false;
+                            }
+                        }
+                    }
+
+                    if needs_scan {
+                        let placeholder = ModInfo {
+                            key: key.clone(), name: key.clone(),
+                            detected_project_id: None, confirmed_project_id: None,
+                            version_local: None, version_remote: None, selected: true,
+                            file_size_bytes: None, file_mtime_secs: None, depends: None,
+                            has_local_icon: false,
+                        };
+                        self.mods.insert(key, UiModInfo {
+                            inner: placeholder, status: ModStatus::Resolving, progress: 0.0,
+                        });
+                        let _ = self.tx_read_jobs.send(ReadJob { file_path: path });
+                    }
                 }
             }
         }
@@ -76,7 +99,7 @@ impl super::app::ModUpdaterApp {
                             let color = if is_selected_ui { tui_theme::ACCENT } else { tui_theme::TEXT_PRIMARY };
                             let text = egui::RichText::new(&label).color(color).family(egui::FontFamily::Monospace);
                             
-                            if ui.add(egui::SelectableLabel::new(is_selected_ui, text)).clicked() {
+                            if ui.add(egui::Button::selectable(is_selected_ui, text)).clicked() {
                                 let target_folder = if is_selected_ui {
                                     self.selected_modpack_ui = None;
                                     PATHS.mods_folder.clone()
@@ -167,6 +190,7 @@ impl super::app::ModUpdaterApp {
                 .clicked() {
                     // Open confirmation modal with default name
                     self.download_confirmation_name = Some(format!("mods{}", self.selected_mc_version));
+                    self.download_source = DownloadSource::Explorer;
             }
              
             if tui_button_c(ui, "DEL", tui_theme::NEON_RED).clicked() {
@@ -188,6 +212,10 @@ impl super::app::ModUpdaterApp {
                 // Open modal instead of creating directly
                 self.create_profile_modal_name = Some(String::new());
             }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                tui_dim(ui, &format!("Total: {}", self.mods.len()));
+            });
         });
         ui.add_space(8.0);
         ScrollArea::vertical().show(ui, |ui| {
@@ -199,9 +227,54 @@ impl super::app::ModUpdaterApp {
             });
             for key in keys {
                 if let Some(m) = self.mods.get_mut(&key) {
+                    ui.separator();
                     ui.horizontal(|ui| {
                         tui_checkbox(ui, &mut m.selected);
                         
+                        // Icon rendering
+                        if m.inner.has_local_icon {
+                            let icon_path = crate::paths_vars::PATHS.icons_folder.join(format!("{}.png", m.inner.detected_project_id.as_deref().unwrap_or("")));
+                            if icon_path.exists() {
+                                let icon_key = icon_path.to_string_lossy().to_string();
+                                
+                                // Load into cache if not present
+                                if !self.loaded_icons.contains_key(&icon_key) {
+                                    if let Ok(bytes) = std::fs::read(&icon_path) {
+                                        if let Ok(img) = image::load_from_memory(&bytes) {
+                                            let size = [img.width() as _, img.height() as _];
+                                            let image_buffer = img.into_rgba8();
+                                            let pixels = image_buffer.as_flat_samples();
+                                            let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                                                size,
+                                                pixels.as_slice(),
+                                            );
+                                            let texture = ui.ctx().load_texture(
+                                                &icon_key,
+                                                color_image,
+                                                egui::TextureOptions::LINEAR,
+                                            );
+                                            self.loaded_icons.insert(icon_key.clone(), texture);
+                                        }
+                                    }
+                                }
+
+                                // Render from cache
+                                if let Some(texture) = self.loaded_icons.get(&icon_key) {
+                                    let img = egui::Image::new(texture).fit_to_exact_size(egui::vec2(48.0, 48.0)).corner_radius(4.0);
+                                    ui.add(img);
+                                } else {
+                                    // Fallback blank box if failed to load
+                                    ui.allocate_space(egui::vec2(48.0, 48.0));
+                                }
+                            } else {
+                                // Fallback blank box if not found on disk yet
+                                ui.allocate_space(egui::vec2(48.0, 48.0));
+                            }
+                        } else {
+                            // Empty box for alignment if no icon
+                            ui.allocate_space(egui::vec2(48.0, 48.0));
+                        }
+
                         ui.vertical(|ui| {
                             ui.horizontal(|ui| {
                                 ui.label(egui::RichText::new(&m.name)
@@ -248,35 +321,38 @@ impl super::app::ModUpdaterApp {
                                 }
                                 if let Some(mc) = mc_label { summary_parts.push(mc); }
 
-                                if !summary_parts.is_empty() {
-                                    tui_dim(ui, &format!("├── {}", summary_parts.join("  |  ")));
-                                }
+                                ui.horizontal(|ui| {
+                                    if !summary_parts.is_empty() {
+                                        tui_dim(ui, &format!("├── {}", summary_parts.join("  |  ")));
+                                    }
 
-                                // Collapsible for actual mod dependencies only
-                                if !mod_deps.is_empty() {
-                                    let header_text = format!("Dependencias ({})", mod_deps.len());
-                                    egui::CollapsingHeader::new(
-                                        egui::RichText::new(&header_text)
-                                            .family(egui::FontFamily::Monospace)
-                                            .color(tui_theme::TEXT_DIM)
-                                            .size(11.0)
-                                    )
-                                    .id_salt(format!("moddeps_{}", &m.inner.key))
-                                    .default_open(false)
-                                    .show(ui, |ui| {
-                                        for item in &mod_deps {
-                                            ui.horizontal(|ui| {
-                                                tui_dim(ui, "•");
-                                                ui.label(
-                                                    egui::RichText::new(item)
-                                                        .family(egui::FontFamily::Monospace)
-                                                        .color(tui_theme::TEXT_DIM)
-                                                        .size(11.0)
-                                                );
-                                            });
-                                        }
-                                    });
-                                }
+                                    // Collapsible for actual mod dependencies only
+                                    if !mod_deps.is_empty() {
+                                        ui.add_space(8.0);
+                                        let header_text = format!("Dependencias ({})", mod_deps.len());
+                                        egui::CollapsingHeader::new(
+                                            egui::RichText::new(&header_text)
+                                                .family(egui::FontFamily::Monospace)
+                                                .color(tui_theme::TEXT_DIM)
+                                                .size(11.0)
+                                        )
+                                        .id_salt(format!("moddeps_{}", &m.inner.key))
+                                        .default_open(false)
+                                        .show(ui, |ui| {
+                                            for item in &mod_deps {
+                                                ui.horizontal(|ui| {
+                                                    tui_dim(ui, "•");
+                                                    ui.label(
+                                                        egui::RichText::new(item)
+                                                            .family(egui::FontFamily::Monospace)
+                                                            .color(tui_theme::TEXT_DIM)
+                                                            .size(11.0)
+                                                    );
+                                                });
+                                            }
+                                        });
+                                    }
+                                });
                             }
 
                         });
@@ -310,7 +386,6 @@ impl super::app::ModUpdaterApp {
                             }
                         });
                     });
-                    ui.separator();
                 }
             }
         });

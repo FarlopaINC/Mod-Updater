@@ -108,6 +108,7 @@ pub enum DeletionConfirmation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DownloadSource {
+    None,
     Explorer,
     Profile(String),
 }

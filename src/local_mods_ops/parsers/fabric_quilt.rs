@@ -13,6 +13,7 @@ struct FabricModJson {
     pub name: String,
     pub version: Option<String>,
     pub depends: Option<std::collections::HashMap<String, serde_json::Value>>,
+    pub icon: Option<serde_json::Value>,
 }
 
 // ── Parser ───────────────────────────────────────────────────
@@ -39,6 +40,27 @@ pub fn try_parse(zip: &mut ZipArchive<File>, path: &Path) -> Option<ModInfo> {
         }).collect()
     });
 
+    let mut has_local_icon = false;
+    let mut possible_icons = vec!["pack.png".to_string(), "assets/icon.png".to_string()];
+    if let Some(icon_val) = &mod_json.icon {
+        if let Some(s) = icon_val.as_str() {
+            possible_icons.insert(0, s.to_string());
+        } else if let Some(obj) = icon_val.as_object() {
+            for (_, path) in obj {
+                if let Some(s) = path.as_str() {
+                    possible_icons.insert(0, s.to_string());
+                }
+            }
+        }
+    }
+
+    for path in possible_icons {
+        if super::extract_and_save_icon(zip, &path, &mod_json.id) {
+            has_local_icon = true;
+            break;
+        }
+    }
+
     Some(ModInfo {
         key,
         name: mod_json.name,
@@ -50,5 +72,6 @@ pub fn try_parse(zip: &mut ZipArchive<File>, path: &Path) -> Option<ModInfo> {
         file_size_bytes: None,
         file_mtime_secs: None,
         depends,
+        has_local_icon,
     })
 }
